@@ -33,13 +33,12 @@ from trading_system.services.snapshot import SnapshotBundle
 from trading_system.services.readiness import ReadinessCoordinator
 from trading_system.services.snapshot import SnapshotService
 from trading_system.settings import Settings, get_settings
-from trading_system.worker.feed import GrowwFeedWorker
-
-
-ACCOUNT_KEY = "primary"
-OPTION_CHAIN_KEY = "nifty-current"
-NEAREST_FUTURE_QUOTE_KEY = "nifty-nearest-future"
-
+from trading_system.runtime_keys import (
+    ACCOUNT_KEY,
+    NEAREST_FUTURE_QUOTE_KEY,
+    OPTION_CHAIN_KEY,
+)
+from trading_system.worker.feed import FeedSubscriptionSet, GrowwFeedWorker
 
 @dataclass(frozen=True, slots=True)
 class AuthenticatedSessionFactory:
@@ -53,6 +52,13 @@ class AuthenticatedSessionFactory:
     def create(self) -> tuple[object, object]:
         sdk_client = self.authenticator.create_client(self.settings)
         return self.broker_factory(sdk_client), self.feed_factory(sdk_client)
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciledSession:
+    feed: object
+    snapshot: object
+    universe: object
 
 
 async def acquire_authenticated_session(
@@ -291,6 +297,64 @@ async def persist_snapshot(
     return universe
 
 
+async def acquire_reconciled_session(
+    sessions: AuthenticatedSessionFactory,
+    readiness: Any,
+    repository: Any,
+    live_state: Any,
+    *,
+    snapshot_factory: Callable[[object], Any],
+    persister: Callable[[Any, Any, object], Any],
+    sleeper: Callable[[float], object],
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> ReconciledSession:
+    """Retry the complete live reconciliation gate with a fresh session."""
+    while True:
+        phase = "authentication"
+        try:
+            broker, feed = sessions.create()
+            phase = "snapshot"
+            snapshot = await snapshot_factory(broker).refresh()
+            phase = "persistence"
+            universe = await persister(repository, live_state, snapshot)
+            return ReconciledSession(feed=feed, snapshot=snapshot, universe=universe)
+        except BrokerUnavailable as error:
+            observed_at = clock()
+            dependency = "groww-auth" if phase == "authentication" else "groww"
+            await readiness.dependency_blocked(dependency)
+            await repository.save_health_transition(
+                service=dependency,
+                state="blocked",
+                source="worker",
+                idempotency_key=_key(
+                    dependency, f"{error.code}:{observed_at.isoformat()}"
+                ),
+                observed_at=observed_at,
+                raw_payload={
+                    "code": error.code,
+                    "correlation_id": error.correlation_id,
+                },
+            )
+            result = sleeper(5.0)
+            if inspect.isawaitable(result):
+                await result
+
+
+def _feed_subscriptions(universe: NiftyUniverse) -> FeedSubscriptionSet:
+    option_instruments = tuple(
+        contract.instrument for contract in universe.option_chain.contracts
+    )
+    return FeedSubscriptionSet(
+        index=universe.index,
+        derivatives=(universe.future, *option_instruments),
+        quote_key=lambda instrument: (
+            NEAREST_FUTURE_QUOTE_KEY
+            if instrument.instrument_token == universe.future.instrument_token
+            else instrument.instrument_token
+        ),
+    )
+
+
 async def run_worker(settings: Settings | None = None) -> None:
     """Run the only process allowed to authenticate and read from Groww."""
     configured = settings or get_settings()
@@ -307,55 +371,57 @@ async def run_worker(settings: Settings | None = None) -> None:
     )
     await readiness.dependencies_ready()
     try:
-        broker, initial_feed = await acquire_authenticated_session(
+        reconciled = await acquire_reconciled_session(
             sessions,
             readiness,
             repository,
+            live_state,
+            snapshot_factory=lambda broker: SnapshotService(broker, max_attempts=1),
+            persister=persist_snapshot,
             sleeper=asyncio.sleep,
         )
-        snapshot = await SnapshotService(broker, max_attempts=1).refresh()
-        universe = await persist_snapshot(repository, live_state, snapshot)
+        universe = reconciled.universe
+        if not isinstance(universe, NiftyUniverse):
+            raise TypeError("reconciliation must resolve a NIFTY universe")
         await readiness.dependencies_ready()
         await readiness.reconciled()
-        pending_feed: list[object] = [initial_feed]
+        pending_feed: list[object] = [reconciled.feed]
 
-        async def reconcile() -> SnapshotBundle:
-            refreshed_broker, refreshed_feed = await acquire_authenticated_session(
+        async def reconcile() -> FeedSubscriptionSet:
+            refreshed = await acquire_reconciled_session(
                 sessions,
                 readiness,
                 repository,
+                live_state,
+                snapshot_factory=lambda broker: SnapshotService(
+                    broker, max_attempts=1
+                ),
+                persister=persist_snapshot,
                 sleeper=asyncio.sleep,
             )
-            refreshed = await SnapshotService(
-                refreshed_broker, max_attempts=1
-            ).refresh()
-            await persist_snapshot(repository, live_state, refreshed)
-            pending_feed[:] = [refreshed_feed]
-            return refreshed
+            refreshed_universe = refreshed.universe
+            if not isinstance(refreshed_universe, NiftyUniverse):
+                raise TypeError("reconciliation must resolve a NIFTY universe")
+            pending_feed[:] = [refreshed.feed]
+            return _feed_subscriptions(refreshed_universe)
 
         def feed_factory() -> object:
             if not pending_feed:
                 raise RuntimeError("feed session must be reconciled before reconnect")
             return pending_feed.pop()
 
-        option_instruments = tuple(
-            contract.instrument for contract in universe.option_chain.contracts
-        )
+        subscriptions = _feed_subscriptions(universe)
         worker = GrowwFeedWorker(
             feed_factory=feed_factory,
-            index=universe.index,
-            derivatives=(universe.future, *option_instruments),
+            index=subscriptions.index,
+            derivatives=subscriptions.derivatives,
             repository=repository,
             redis_state=live_state,
             candle_builder=CandleBuilder(NseSessionCalendar()),
             readiness=readiness,
             stale_after_seconds=configured.feed_stale_seconds,
             reconcile=reconcile,
-            quote_key=lambda instrument: (
-                NEAREST_FUTURE_QUOTE_KEY
-                if instrument.instrument_token == universe.future.instrument_token
-                else instrument.instrument_token
-            ),
+            quote_key=subscriptions.quote_key,
         )
         await worker.run()
     finally:
@@ -372,6 +438,7 @@ __all__ = [
     "ACCOUNT_KEY",
     "AuthenticatedSessionFactory",
     "acquire_authenticated_session",
+    "acquire_reconciled_session",
     "NEAREST_FUTURE_QUOTE_KEY",
     "OPTION_CHAIN_KEY",
     "persist_snapshot",

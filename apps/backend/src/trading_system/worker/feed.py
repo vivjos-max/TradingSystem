@@ -107,6 +107,13 @@ class ReadinessPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class FeedSubscriptionSet:
+    index: Instrument
+    derivatives: tuple[Instrument, ...]
+    quote_key: Callable[[Instrument], str]
+
+
+@dataclass(frozen=True, slots=True)
 class _FeedMessage:
     response: dict[str, Any]
     instruments: tuple[Instrument, ...]
@@ -542,9 +549,13 @@ class GrowwFeedWorker:
             return not self._stop_event.is_set()
         if self._reconcile is None:
             raise RuntimeError("reconciliation is required before feed recovery")
-        await self._reconcile()
+        reconciled = await self._reconcile()
         if self._stop_event.is_set():
             return False
+        if isinstance(reconciled, FeedSubscriptionSet):
+            self._index = reconciled.index
+            self._derivatives = reconciled.derivatives
+            self._quote_key = reconciled.quote_key
         await self._readiness.dependencies_ready()
         if self._stop_event.is_set():
             return False
@@ -632,4 +643,4 @@ class GrowwFeedWorker:
         return f"feed:{sha256(material.encode()).hexdigest()}"
 
 
-__all__ = ["GrowwFeed", "GrowwFeedWorker"]
+__all__ = ["FeedSubscriptionSet", "GrowwFeed", "GrowwFeedWorker"]

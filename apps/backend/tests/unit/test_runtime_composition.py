@@ -22,6 +22,7 @@ from trading_system.services.snapshot import SnapshotBundle
 from trading_system.worker.runtime import (
     AuthenticatedSessionFactory,
     acquire_authenticated_session,
+    acquire_reconciled_session,
     persist_snapshot,
 )
 
@@ -294,3 +295,100 @@ async def test_invalid_groww_access_stays_blocked_and_retries_in_process() -> No
         "GROWW_AUTH_FAILED",
         "GROWW_AUTH_FAILED",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_phase", "code"),
+    [
+        ("snapshot", "GROWW_PERMISSION_DENIED"),
+        ("snapshot", "GROWW_RATE_LIMITED"),
+        ("snapshot", "GROWW_TIMEOUT"),
+        ("persistence", "GROWW_CONTRACT_MISMATCH"),
+    ],
+)
+async def test_startup_reconciliation_retries_every_safe_broker_failure_with_a_fresh_session(
+    failure_phase: str, code: str
+) -> None:
+    sessions_created: list[object] = []
+    snapshots = [object(), object()]
+
+    class Sessions:
+        def create(self) -> tuple[object, object]:
+            broker = object()
+            sessions_created.append(broker)
+            return broker, f"feed-{len(sessions_created)}"
+
+    class Snapshotter:
+        def __init__(self, broker: object) -> None:
+            self.broker = broker
+
+        async def refresh(self) -> object:
+            if failure_phase == "snapshot" and len(sessions_created) == 1:
+                raise BrokerUnavailable(
+                    code=code,
+                    correlation_id="safe-first",
+                    summary="safe summary",
+                )
+            return snapshots[len(sessions_created) - 1]
+
+    class Readiness:
+        def __init__(self) -> None:
+            self.blocked: list[str] = []
+
+        async def dependency_blocked(self, dependency: str) -> None:
+            self.blocked.append(dependency)
+
+    repository = RecordingRepository()
+    repository.transitions = []
+
+    async def save_health_transition(**values: object) -> bool:
+        repository.transitions.append(values)
+        return True
+
+    repository.save_health_transition = save_health_transition  # type: ignore[attr-defined]
+    persistence_calls = 0
+
+    async def persister(
+        value_repository: object, value_state: object, snapshot: object
+    ) -> str:
+        nonlocal persistence_calls
+        assert value_repository is repository
+        assert value_state is live_state
+        persistence_calls += 1
+        if failure_phase == "persistence" and persistence_calls == 1:
+            raise BrokerUnavailable(
+                code=code,
+                correlation_id="safe-first",
+                summary="safe summary",
+            )
+        return f"universe-{persistence_calls}"
+
+    readiness = Readiness()
+    live_state = object()
+    sleeps: list[float] = []
+
+    result = await acquire_reconciled_session(
+        Sessions(),
+        readiness,
+        repository,
+        live_state,
+        snapshot_factory=Snapshotter,
+        persister=persister,
+        sleeper=lambda delay: sleeps.append(delay),
+        clock=lambda: AT,
+    )
+
+    assert len(sessions_created) == 2
+    assert result.feed == "feed-2"
+    assert result.universe == (
+        "universe-1" if failure_phase == "snapshot" else "universe-2"
+    )
+    assert readiness.blocked == ["groww"]
+    assert sleeps == [5.0]
+    transition = repository.transitions[0]
+    assert transition["raw_payload"] == {
+        "code": code,
+        "correlation_id": "safe-first",
+    }
+    assert "safe summary" not in str(transition)

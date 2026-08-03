@@ -7,6 +7,8 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 COMPOSE_FILE = REPOSITORY_ROOT / "compose.yaml"
+BACKEND_DOCKERFILE = REPOSITORY_ROOT / "apps" / "backend" / "Dockerfile"
+BACKEND_RUNTIME_LOCK = REPOSITORY_ROOT / "apps" / "backend" / "requirements.runtime.lock"
 
 
 def _environment_names(service: dict[str, object]) -> set[str]:
@@ -26,6 +28,9 @@ def test_compose_is_private_read_only_and_health_ordered() -> None:
 
     assert services["postgres"]["image"] == "postgres:17-alpine"
     assert services["redis"]["image"] == "redis:8-alpine"
+    assert "appendonly" not in " ".join(services["redis"]["command"])
+    assert "volumes" not in services["redis"]
+    assert set(compose.get("volumes", {})) == {"postgres-data"}
     assert services["api"]["build"] == services["worker"]["build"]
     assert services["api"]["image"] == services["worker"]["image"]
     assert services["api"]["command"] != services["worker"]["command"]
@@ -70,3 +75,17 @@ def test_compose_is_private_read_only_and_health_ordered() -> None:
 
     worker_restart = services["worker"].get("restart", "")
     assert worker_restart not in {"always", "unless-stopped"}
+
+
+def test_backend_image_installs_the_linux_runtime_hash_lock() -> None:
+    dockerfile = BACKEND_DOCKERFILE.read_text(encoding="utf-8")
+    locked_packages = {
+        line.split("==", maxsplit=1)[0]
+        for line in BACKEND_RUNTIME_LOCK.read_text(encoding="utf-8").splitlines()
+        if line and not line[0].isspace() and "==" in line
+    }
+
+    assert "requirements.runtime.lock" in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert "pip install --no-cache-dir /workspace/apps/backend" not in dockerfile
+    assert {"pytest", "pip-tools", "testcontainers", "pywin32"}.isdisjoint(locked_packages)

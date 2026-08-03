@@ -26,6 +26,7 @@ from trading_system.persistence.redis_state import (
     RedisLiveState,
     SubscriptionState,
 )
+from trading_system.services.readiness import ReadinessCoordinator
 
 
 @pytest.fixture(scope="module")
@@ -242,3 +243,56 @@ async def test_existing_heartbeat_really_expires(
     await asyncio.sleep(1.1)
 
     assert await state.get_heartbeat("expiring") is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redis_recreation_starts_without_readiness_or_live_state() -> None:
+    at = datetime(2026, 8, 3, 9, 15, tzinfo=UTC)
+
+    with (
+        DockerContainer("redis:8-alpine")
+        .with_exposed_ports(6379)
+        .waiting_for(LogMessageWaitStrategy("Ready to accept connections"))
+    ) as first_container:
+        first_client: Redis = Redis.from_url(
+            f"redis://{first_container.get_container_host_ip()}:"
+            f"{first_container.get_exposed_port(6379)}/0",
+            decode_responses=True,
+        )
+        first_state = RedisLiveState(first_client)
+        first_readiness = ReadinessCoordinator(first_state, clock=lambda: at)
+        await first_readiness.dependencies_ready()
+        await first_readiness.reconciled()
+        await first_readiness.first_live_update()
+        await first_state.set_quote(
+            "NIFTY50",
+            QuoteState(
+                instrument_key="NIFTY50",
+                observed_at=at,
+                payload={"last_price": "25001", "source": "groww_live"},
+            ),
+        )
+        assert first_readiness.is_ready is True
+        await first_client.aclose()
+
+    with (
+        DockerContainer("redis:8-alpine")
+        .with_exposed_ports(6379)
+        .waiting_for(LogMessageWaitStrategy("Ready to accept connections"))
+    ) as replacement_container:
+        replacement_client: Redis = Redis.from_url(
+            f"redis://{replacement_container.get_container_host_ip()}:"
+            f"{replacement_container.get_exposed_port(6379)}/0",
+            decode_responses=True,
+        )
+        replacement_state = RedisLiveState(replacement_client)
+        replacement_readiness = ReadinessCoordinator(
+            replacement_state, clock=lambda: at
+        )
+        await replacement_readiness.restore()
+
+        assert replacement_readiness.is_ready is False
+        assert await replacement_state.get_quote("NIFTY50") is None
+        assert await replacement_state.get_heartbeat("readiness") is None
+        await replacement_client.aclose()

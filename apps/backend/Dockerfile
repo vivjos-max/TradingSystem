@@ -6,8 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /workspace
 
+COPY apps/backend/requirements.runtime.lock /tmp/requirements.runtime.lock
+RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.runtime.lock
+
 COPY apps/backend /workspace/apps/backend
-RUN python -m pip install --no-cache-dir /workspace/apps/backend
 
 EXPOSE 8000
 

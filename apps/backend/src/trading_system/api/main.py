@@ -33,7 +33,11 @@ def create_app(container: AppContainer) -> FastAPI:
             # A cache/network failure leaves the coordinator not-ready; routes expose only
             # the structured 503 response instead of process-startup exception details.
             pass
-        yield
+        try:
+            yield
+        finally:
+            if container.shutdown is not None:
+                await container.shutdown()
 
     app = FastAPI(
         title="Trading System Read-Only API", version="0.1.0", lifespan=lifespan

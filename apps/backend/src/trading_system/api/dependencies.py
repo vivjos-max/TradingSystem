@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Protocol
+from typing import Awaitable, Callable, Protocol
 
 from trading_system.persistence.postgres import (
     BrokerSnapshotRecord,
@@ -74,6 +74,7 @@ class AppContainer:
         "http://127.0.0.1:3000",
         "http://localhost:3000",
     )
+    shutdown: Callable[[], Awaitable[None]] | None = None
 
 
 __all__ = [

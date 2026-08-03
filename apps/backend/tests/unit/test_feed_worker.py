@@ -16,7 +16,7 @@ from trading_system.persistence.redis_state import (
     SubscriptionState,
 )
 from trading_system.services.readiness import ReadinessCoordinator
-from trading_system.worker.feed import GrowwFeedWorker
+from trading_system.worker.feed import FeedSubscriptionSet, GrowwFeedWorker
 
 
 AT = datetime(2026, 8, 3, 9, 15, tzinfo=UTC)
@@ -273,12 +273,13 @@ def ltp_payload() -> dict[str, Any]:
     }
 
 
-async def yield_until(predicate: Callable[[], bool]) -> None:
-    for _ in range(2000):
+async def yield_until(predicate: Callable[[], bool], *, timeout_seconds: float = 15) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
         if predicate():
             return
         await asyncio.sleep(0)
-    raise AssertionError("condition was not reached")
+    raise AssertionError(f"condition was not reached within {timeout_seconds} seconds")
 
 
 async def successful_reconciliation() -> object:
@@ -798,6 +799,54 @@ async def test_disconnect_reconciles_before_reconnect_tick_restores_shared_ready
     assert shared.payload["ready"] is True
     assert reconciliations == 1
 
+
+@pytest.mark.asyncio
+async def test_reconnect_replaces_expired_future_subscription_and_lookup_mapping() -> None:
+    rolled_future = instrument(
+        "NIFTY-SEP-FUT", "FUTIDX", expiry=date(2026, 9, 24)
+    )
+    release = Event()
+    first_feed = FakeFeed(consume_error=RuntimeError("feed disconnected"))
+    second_feed = ControlledFeed(release)
+    feeds = [first_feed, second_feed]
+    redis_state = MemoryRedisState()
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: feeds.pop(0),
+        index=INDEX,
+        derivatives=(FUTURE,),
+        repository=MemoryRepository(),
+        redis_state=redis_state,
+        candle_builder=RecordingCandleBuilder(),
+        readiness=ReadinessCoordinator(redis_state, clock=lambda: AT),
+        reconcile=lambda: asyncio.sleep(
+            0,
+            result=FeedSubscriptionSet(
+                index=INDEX,
+                derivatives=(rolled_future,),
+                quote_key=lambda item: (
+                    "nifty-nearest-future"
+                    if item.instrument_token == rolled_future.instrument_token
+                    else item.instrument_token
+                ),
+            ),
+        ),
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+    )
+
+    task = asyncio.create_task(worker.run())
+    await yield_until(lambda: bool(second_feed.ltp_subscriptions))
+    await worker.stop()
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert first_feed.ltp_subscriptions[0][0]["exchange_token"] == "NIFTY-FUT"
+    assert second_feed.ltp_subscriptions[0] == [
+        {"exchange": "NSE", "segment": "FNO", "exchange_token": "NIFTY-SEP-FUT"}
+    ]
+    assert worker._quote_key(rolled_future) == "nifty-nearest-future"
 
 @pytest.mark.asyncio
 async def test_failed_reconciliation_never_restores_or_resubscribes() -> None:
