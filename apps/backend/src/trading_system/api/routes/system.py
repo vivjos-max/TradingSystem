@@ -11,7 +11,7 @@ from trading_system.api.dependencies import AppContainer
 from trading_system.api.routes.health import (
     SafeUnavailableResponse,
     correlation_id,
-    get_ready_container,
+    get_container,
     unavailable_response,
     utc_now,
 )
@@ -63,7 +63,7 @@ router = APIRouter(prefix="/api/v1/system", tags=["system"])
     responses={503: {"model": SafeUnavailableResponse}},
 )
 async def status(
-    container: AppContainer = Depends(get_ready_container),
+    container: AppContainer = Depends(get_container),
 ) -> SystemStatusResponse | object:
     try:
         transitions = await container.repository.latest_health_transitions()

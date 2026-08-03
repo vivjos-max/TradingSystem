@@ -26,13 +26,22 @@ class _QuotePayload(BaseModel):
     source: str
 
 
-class NiftyQuoteResponse(BaseModel):
+class QuoteSnapshotResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     instrument_key: str
     last_price: Decimal
     source: str
     source_observed_at: datetime
+    served_at: datetime
+    correlation_id: str
+
+
+class NiftyMarketResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    spot: QuoteSnapshotResponse
+    future: QuoteSnapshotResponse
     served_at: datetime
     correlation_id: str
 
@@ -44,6 +53,17 @@ class _OptionContractPayload(BaseModel):
     strike: Decimal
     option_type: str
     last_price: Decimal | None = None
+    bid_price: Decimal | None = None
+    ask_price: Decimal | None = None
+    spread: Decimal | None = None
+    volume: int | None = None
+    open_interest: int | None = None
+    implied_volatility: Decimal | None = None
+    delta: Decimal | None = None
+    gamma: Decimal | None = None
+    theta: Decimal | None = None
+    vega: Decimal | None = None
+    rho: Decimal | None = None
 
 
 class _OptionChainPayload(BaseModel):
@@ -51,6 +71,8 @@ class _OptionChainPayload(BaseModel):
 
     expiry: str
     source: str
+    atm_strike: Decimal
+    selected_strikes: list[Decimal]
     contracts: list[_OptionContractPayload]
 
 
@@ -61,6 +83,17 @@ class OptionContractResponse(BaseModel):
     strike: Decimal
     option_type: str
     last_price: Decimal | None
+    bid_price: Decimal | None
+    ask_price: Decimal | None
+    spread: Decimal | None
+    volume: int | None
+    open_interest: int | None
+    implied_volatility: Decimal | None
+    delta: Decimal | None
+    gamma: Decimal | None
+    theta: Decimal | None
+    vega: Decimal | None
+    rho: Decimal | None
 
 
 class NiftyOptionChainResponse(BaseModel):
@@ -68,6 +101,7 @@ class NiftyOptionChainResponse(BaseModel):
 
     expiry: str
     source: str
+    atm_strike: Decimal
     source_observed_at: datetime
     contracts: list[OptionContractResponse]
     served_at: datetime
@@ -104,27 +138,38 @@ router = APIRouter(prefix="/api/v1/market", tags=["market"])
 
 @router.get(
     "/nifty",
-    response_model=NiftyQuoteResponse,
+    response_model=NiftyMarketResponse,
     responses={503: {"model": SafeUnavailableResponse}},
 )
 async def nifty_quote(
     container: AppContainer = Depends(get_ready_container),
-) -> NiftyQuoteResponse | object:
+) -> NiftyMarketResponse | object:
     try:
-        quote = await container.live_state.get_quote(container.nifty_instrument_key)
-        if quote is None:
+        if not container.nifty_future_instrument_key:
             return unavailable_response()
-        payload = _QuotePayload.model_validate(quote.payload)
+        spot = await container.live_state.get_quote(container.nifty_instrument_key)
+        future = await container.live_state.get_quote(container.nifty_future_instrument_key)
+        if spot is None or future is None:
+            return unavailable_response()
+        spot_payload = _QuotePayload.model_validate(spot.payload)
+        future_payload = _QuotePayload.model_validate(future.payload)
     except (TypeError, ValueError, ValidationError):
         return unavailable_response()
     except Exception:
         return unavailable_response()
-    return NiftyQuoteResponse(
-        instrument_key=quote.instrument_key,
-        last_price=payload.last_price,
-        source=payload.source,
-        source_observed_at=quote.observed_at,
-        served_at=utc_now(),
+    served_at = utc_now()
+    return NiftyMarketResponse(
+        spot=QuoteSnapshotResponse(
+            instrument_key=spot.instrument_key, last_price=spot_payload.last_price,
+            source=spot_payload.source, source_observed_at=spot.observed_at,
+            served_at=served_at, correlation_id=correlation_id(),
+        ),
+        future=QuoteSnapshotResponse(
+            instrument_key=future.instrument_key, last_price=future_payload.last_price,
+            source=future_payload.source, source_observed_at=future.observed_at,
+            served_at=served_at, correlation_id=correlation_id(),
+        ),
+        served_at=served_at,
         correlation_id=correlation_id(),
     )
 
@@ -146,9 +191,19 @@ async def nifty_options(
         return unavailable_response()
     except Exception:
         return unavailable_response()
+    allowed_count = 2 * container.option_strikes_each_side + 1
+    selected = payload.selected_strikes
+    if (
+        container.option_strikes_each_side < 0
+        or len(selected) > allowed_count
+        or payload.atm_strike not in selected
+        or any(contract.strike not in selected for contract in payload.contracts)
+    ):
+        return unavailable_response()
     return NiftyOptionChainResponse(
         expiry=payload.expiry,
         source=payload.source,
+        atm_strike=payload.atm_strike,
         source_observed_at=chain.observed_at,
         contracts=[
             OptionContractResponse(
@@ -156,6 +211,11 @@ async def nifty_options(
                 strike=contract.strike,
                 option_type=contract.option_type,
                 last_price=contract.last_price,
+                bid_price=contract.bid_price, ask_price=contract.ask_price,
+                spread=contract.spread, volume=contract.volume,
+                open_interest=contract.open_interest,
+                implied_volatility=contract.implied_volatility, delta=contract.delta,
+                gamma=contract.gamma, theta=contract.theta, vega=contract.vega, rho=contract.rho,
             )
             for contract in payload.contracts
         ],
@@ -174,7 +234,9 @@ async def nifty_candles(
     container: AppContainer = Depends(get_ready_container),
 ) -> NiftyCandlesResponse | object:
     try:
-        records = await container.repository.latest_candles(finalized=True)
+        records = await container.repository.recent_candles(
+            container.nifty_instrument_key, interval, limit=container.candle_history_limit
+        )
     except Exception:
         return unavailable_response()
     candles = [

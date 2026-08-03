@@ -231,3 +231,33 @@ async def test_maximum_caller_candle_key_remains_bounded_and_idempotent(
     assert await repository.save_candles(
         source="groww_live", idempotency_key=maximum_caller_key, candles=[candle]
     ) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_recent_candles_returns_a_bounded_event_time_ordered_history(
+    repository: PostgresRepository,
+) -> None:
+    opened_at = datetime(2026, 8, 3, 11, 0, tzinfo=UTC)
+    candles = [
+        CandleInput(
+            instrument_key="NSE:NIFTY50:RECENT",
+            interval="1m",
+            opened_at=opened_at + timedelta(minutes=index),
+            closed_at=opened_at + timedelta(minutes=index + 1),
+            open=Decimal("25000"), high=Decimal("25001"), low=Decimal("24999"),
+            close=Decimal(str(25000 + index)), volume=index, finalized=True,
+            is_late=False, raw_payload={"sequence": index},
+        )
+        for index in range(3)
+    ]
+    assert await repository.save_candles(
+        source="groww_live", idempotency_key="recent-candles", candles=candles
+    ) == 3
+
+    recent = await repository.recent_candles("NSE:NIFTY50:RECENT", "1m", limit=2)
+
+    assert [candle.opened_at for candle in recent] == [
+        opened_at + timedelta(minutes=1), opened_at + timedelta(minutes=2)
+    ]
+    assert [candle.source for candle in recent] == ["groww_live", "groww_live"]

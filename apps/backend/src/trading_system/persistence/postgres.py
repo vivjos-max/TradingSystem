@@ -214,6 +214,28 @@ def _latest_candles_statement(
     )
 
 
+def _recent_candles_statement(
+    instrument_key: str, interval: str, limit: int
+) -> Select[tuple[CandleRow]]:
+    recent = (
+        select(CandleRow.id.label("row_id"))
+        .where(
+            CandleRow.instrument_key == instrument_key,
+            CandleRow.interval == interval,
+            CandleRow.finalized.is_(True),
+            CandleRow.is_late.is_(False),
+        )
+        .order_by(CandleRow.opened_at.desc(), CandleRow.created_at.desc(), CandleRow.id.desc())
+        .limit(limit)
+        .subquery()
+    )
+    return (
+        select(CandleRow)
+        .join(recent, CandleRow.id == recent.c.row_id)
+        .order_by(CandleRow.opened_at.asc(), CandleRow.created_at.asc(), CandleRow.id.asc())
+    )
+
+
 class PostgresRepository:
     """Narrow repository; it deliberately exposes no generic SQL execution surface."""
 
@@ -438,6 +460,26 @@ class PostgresRepository:
                 row.finalized,
                 row.is_late,
                 row.raw_payload,
+            )
+            for row in rows
+        ]
+
+    async def recent_candles(
+        self, instrument_key: str, interval: str, *, limit: int
+    ) -> list[CandleRecord]:
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        statement = _recent_candles_statement(
+            _required(instrument_key, "instrument_key"), _required(interval, "interval"), limit
+        )
+        async with self._sessions() as session:
+            rows = (await session.scalars(statement)).all()
+        return [
+            CandleRecord(
+                row.instrument_key, row.interval, row.source, row.idempotency_key,
+                _utc(row.opened_at, "opened_at"), _utc(row.closed_at, "closed_at"),
+                row.open, row.high, row.low, row.close, row.volume, row.finalized,
+                row.is_late, row.raw_payload,
             )
             for row in rows
         ]
