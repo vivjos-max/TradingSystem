@@ -633,6 +633,43 @@ async def test_options_bounds_oversized_input_to_atm_plus_five_strikes_each_side
 
 
 @pytest.mark.asyncio
+async def test_options_rejects_conflicting_duplicate_in_window_row_instead_of_returning_23_contracts() -> None:
+    contracts = [
+        {
+            "instrument_token": f"TEST-{strike}-{option_type}",
+            "strike": strike,
+            "option_type": option_type,
+        }
+        for strike in _ELEVEN_STRIKES
+        for option_type in ("CE", "PE")
+    ]
+    contracts.append(
+        {
+            "instrument_token": "CONFLICTING-25000-CE",
+            "strike": "25000",
+            "option_type": "CE",
+        }
+    )
+    app = _option_app(
+        {
+            "expiry": "2026-08-06",
+            "source": "groww_live",
+            "atm_strike": "25000",
+            "selected_strikes": _ELEVEN_STRIKES,
+            "contracts": contracts,
+        }
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.get("/api/v1/market/nifty/options")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "LIVE_STATE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "context",
     [

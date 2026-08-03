@@ -197,6 +197,20 @@ async def nifty_options(
         if chain is None:
             return unavailable_response()
         payload = _OptionChainPayload.model_validate(chain.payload)
+        selected_strikes = set(payload.selected_strikes)
+        window_contracts = [
+            contract
+            for contract in payload.contracts
+            if contract.strike in selected_strikes
+        ]
+        contract_keys = [
+            (contract.strike, contract.option_type) for contract in window_contracts
+        ]
+        if len(contract_keys) != len(set(contract_keys)):
+            return unavailable_response()
+        window_contracts.sort(
+            key=lambda contract: (contract.strike, contract.option_type)
+        )
     except (TypeError, ValueError, ValidationError):
         return unavailable_response()
     except Exception:
@@ -225,8 +239,7 @@ async def nifty_options(
                 vega=contract.vega,
                 rho=contract.rho,
             )
-            for contract in payload.contracts
-            if contract.strike in set(payload.selected_strikes)
+            for contract in window_contracts
         ],
         served_at=utc_now(),
         correlation_id=correlation_id(),
