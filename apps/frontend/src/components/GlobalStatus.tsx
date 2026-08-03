@@ -3,7 +3,7 @@ import { formatTime } from "@/lib/format";
 interface GlobalStatusProps {
   status: string;
   reason?: string;
-  asOf: string;
+  asOf: string | null;
 }
 
 export function GlobalStatus({ status, reason, asOf }: GlobalStatusProps) {
@@ -16,7 +16,7 @@ export function GlobalStatus({ status, reason, asOf }: GlobalStatusProps) {
       </div>
       <div className="status-detail">
         {reason ? <p>{reason}</p> : <p>Read-only dashboard. Values are displayed as received.</p>}
-        <time dateTime={asOf}>Source observed {formatTime(asOf)}</time>
+        {asOf ? <time dateTime={asOf}>Source observed {formatTime(asOf)}</time> : <span>Awaiting source timestamp</span>}
       </div>
     </section>
   );

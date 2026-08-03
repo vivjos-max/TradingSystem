@@ -57,6 +57,15 @@ describe("OptionTable", () => {
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
     expect(screen.getByText("131.25")).toBeVisible();
     expect(screen.getByText("-0.42")).toBeVisible();
-    expect(screen.getByText(/04:30:00/i)).toBeVisible();
+    expect(screen.getByText(/10:00:00/i)).toBeVisible();
+  });
+
+  it("keeps each selected strike as one CE and PE row when a side is unavailable", () => {
+    render(<OptionTable optionChain={{ ...optionChain, contracts: [optionChain.contracts[0]] }} />);
+
+    expect(screen.getAllByRole("row")).toHaveLength(2);
+    expect(screen.getByRole("columnheader", { name: "CE LTP" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "PE LTP" })).toBeVisible();
+    expect(screen.getByLabelText("PE LTP for 24,800")).toHaveTextContent("—");
   });
 });

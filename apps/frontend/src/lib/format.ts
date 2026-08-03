@@ -15,5 +15,14 @@ export function formatInteger(value: number | null): string {
 
 export function formatTime(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? value : date.toISOString().replace("T", " ").replace(".000Z", "Z");
+  return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).format(date);
 }

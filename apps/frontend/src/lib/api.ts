@@ -15,9 +15,9 @@ function isUnavailable(value: unknown): value is SafeUnavailableResponse {
   return typeof value === "object" && value !== null && "code" in value && (value as { code?: unknown }).code === "LIVE_STATE_UNAVAILABLE";
 }
 
-async function read<T>(path: string): Promise<ApiResult<T>> {
+async function read<T>(path: string, signal?: AbortSignal): Promise<ApiResult<T>> {
   try {
-    const response = await fetch(`${apiBaseUrl}${path}`, { method: "GET" });
+    const response = await fetch(`${apiBaseUrl}${path}`, { method: "GET", signal });
     const payload: unknown = await response.json();
     if (response.status === 503 && isUnavailable(payload)) {
       return { data: null, unavailable: payload, error: null };
@@ -30,10 +30,10 @@ async function read<T>(path: string): Promise<ApiResult<T>> {
 }
 
 export const api = {
-  systemStatus: () => read<SystemStatusResponse>("/api/v1/system/status"),
-  niftyQuote: () => read<NiftyQuoteResponse>("/api/v1/market/nifty"),
-  niftyOptions: () => read<NiftyOptionChainResponse>("/api/v1/market/nifty/options"),
-  niftyCandles: () => read<NiftyCandlesResponse>("/api/v1/market/nifty/candles?interval=5m"),
-  accountSummary: () => read<AccountSummaryResponse>("/api/v1/account/summary"),
-  accountOrders: () => read<AccountOrdersResponse>("/api/v1/account/orders")
+  systemStatus: (signal?: AbortSignal) => read<SystemStatusResponse>("/api/v1/system/status", signal),
+  niftyQuote: (signal?: AbortSignal) => read<NiftyQuoteResponse>("/api/v1/market/nifty", signal),
+  niftyOptions: (signal?: AbortSignal) => read<NiftyOptionChainResponse>("/api/v1/market/nifty/options", signal),
+  niftyCandles: (signal?: AbortSignal) => read<NiftyCandlesResponse>("/api/v1/market/nifty/candles?interval=5m", signal),
+  accountSummary: (signal?: AbortSignal) => read<AccountSummaryResponse>("/api/v1/account/summary", signal),
+  accountOrders: (signal?: AbortSignal) => read<AccountOrdersResponse>("/api/v1/account/orders", signal)
 };

@@ -14,6 +14,6 @@ describe("GlobalStatus", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent("BLOCKED");
     expect(screen.getByText(/subscription unavailable/i)).toBeVisible();
-    expect(screen.getByText(/04:30:00/i)).toBeVisible();
+    expect(screen.getByText(/10:00:00/i)).toBeVisible();
   });
 });
