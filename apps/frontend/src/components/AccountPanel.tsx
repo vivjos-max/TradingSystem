@@ -1,0 +1,7 @@
+import { formatNumber, formatTime, unavailable } from "@/lib/format";
+import type { AccountOrdersResponse, AccountSummaryResponse } from "@/lib/types";
+
+export function AccountPanel({ account, orders }: { account: AccountSummaryResponse | null; orders: AccountOrdersResponse | null }) {
+  if (!account) return <section className="panel"><h2>Account</h2><p>No account summary is available.</p></section>;
+  return <section className="panel" aria-labelledby="account-heading"><div className="panel-heading"><h2 id="account-heading">Account state</h2><time dateTime={account.source_observed_at}>{formatTime(account.source_observed_at)}</time></div><div className="metric-grid"><article><span>Available cash</span><strong>{formatNumber(account.available_cash)}</strong></article><article><span>Used margin</span><strong>{formatNumber(account.used_margin)}</strong></article><article><span>Collateral</span><strong>{formatNumber(account.collateral)}</strong></article><article><span>Today’s records</span><strong>{orders ? orders.orders.length : unavailable}</strong></article></div><div className="position-list">{account.positions.map((position) => <article key={position.instrument_token}><strong>{position.instrument_token}</strong><span>Qty {position.quantity} · Avg {formatNumber(position.average_price)} · Last {formatNumber(position.last_price)}</span><time dateTime={position.source_observed_at}>{formatTime(position.source_observed_at)}</time></article>)}</div></section>;
+}
