@@ -39,6 +39,9 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "integration: requires disposable real infrastructure through testcontainers",
+]
 filterwarnings = [
     "error",
     # pandas-market-calendars 5.4.0's transitive calendar code uses NumPy's deprecated generic timedelta unit.
