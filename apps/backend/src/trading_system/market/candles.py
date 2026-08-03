@@ -32,7 +32,11 @@ class CandleUpdate:
 
 
 class CandleBuilder:
-    """Collect observations by event-time minute; finalized minutes are immutable."""
+    """Collect observations by event-time minute; finalized minutes are immutable.
+
+    Identical event timestamps preserve acceptance order: first accepted sets open and last
+    accepted sets close.
+    """
 
     def __init__(self, calendar: NseSessionCalendar) -> None:
         self._calendar = calendar

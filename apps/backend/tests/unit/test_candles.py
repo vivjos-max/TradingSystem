@@ -43,6 +43,17 @@ def test_minute_intervals_are_half_open_and_open_comes_from_event_time(builder):
     ]
 
 
+def test_identical_event_timestamps_use_acceptance_order_for_open_and_close(builder):
+    builder.accept(observation("2026-08-03T03:45:05+00:00", "102", 1))
+    builder.accept(observation("2026-08-03T03:45:05+00:00", "100", 1))
+
+    candle = builder.finalize_through(datetime(2026, 8, 3, 3, 46, tzinfo=UTC))[0]
+
+    assert (candle.open, candle.close, candle.high, candle.low) == (
+        Decimal("102"), Decimal("100"), Decimal("102"), Decimal("100")
+    )
+
+
 def test_unavailable_volume_is_preserved_as_unavailable(builder):
     builder.accept(observation("2026-08-03T03:45:05+00:00", "100"))
 
