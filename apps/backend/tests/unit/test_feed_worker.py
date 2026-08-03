@@ -240,6 +240,19 @@ class PausedActiveRedis(MemoryRedisState):
         await super().set_subscription_state(subscription_key, value)
 
 
+class PausedStaleRedis(MemoryRedisState):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stale_started = asyncio.Event()
+        self.stale_release = asyncio.Event()
+
+    async def set_heartbeat(self, service: str, value: HeartbeatState) -> None:
+        if service == "groww-feed" and value.payload.get("state") == "stale":
+            self.stale_started.set()
+            await self.stale_release.wait()
+        await super().set_heartbeat(service, value)
+
+
 def index_payload() -> dict[str, Any]:
     return {
         "NSE": {
@@ -433,7 +446,7 @@ async def test_callback_silence_marks_shared_state_stale_and_resets_readiness() 
         observed_at=AT + timedelta(seconds=11),
         payload={"state": "stale", "silence_seconds": 11},
     )
-    assert len(repository.health) == 1
+    assert [value["state"] for value in repository.health.values()] == ["live", "stale"]
 
 
 @pytest.mark.asyncio
@@ -944,6 +957,7 @@ async def test_stop_during_active_state_persistence_cleans_without_consume() -> 
 
     assert feed.consume_calls == 0
     assert len(feed.index_unsubscriptions) == 1
+    assert redis_state.subscriptions["market-feed"].payload["state"] == "inactive"
 
 
 @pytest.mark.asyncio
@@ -955,8 +969,8 @@ async def test_old_stale_transition_cannot_block_new_generation_tick() -> None:
     new_feed = ControlledFeed(new_release)
     new_feed.index_payload["NSE"]["CASH"]["NIFTY50"]["tsInMillis"] = 1785748501123
     feeds = [old_feed, new_feed]
-    repository = PausedHealthRepository()
-    redis_state = MemoryRedisState()
+    repository = MemoryRepository()
+    redis_state = PausedStaleRedis()
     readiness = ReadinessCoordinator(redis_state, clock=lambda: now[0])
     await readiness.dependencies_ready()
     await readiness.reconciled()
@@ -979,11 +993,14 @@ async def test_old_stale_transition_cannot_block_new_generation_tick() -> None:
     await yield_until(lambda: readiness.is_ready)
     now[0] = AT + timedelta(seconds=11)
     stale_task = asyncio.create_task(worker.mark_stale_if_silent())
-    await repository.health_started.wait()
+    await redis_state.stale_started.wait()
     old_release.set()
-    await yield_until(lambda: new_feed.index_callback is not None)
-    repository.health_release.set()
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert new_feed.index_callback is None
+    redis_state.stale_release.set()
     await stale_task
+    await yield_until(lambda: new_feed.index_callback is not None)
     new_feed.emit()
     await yield_until(
         lambda: readiness.is_ready
@@ -995,3 +1012,4 @@ async def test_old_stale_transition_cannot_block_new_generation_tick() -> None:
 
     assert readiness.is_ready is True
     assert redis_state.heartbeats["groww-feed"].payload["state"] == "live"
+    assert list(repository.health.values())[-1]["state"] == "live"
