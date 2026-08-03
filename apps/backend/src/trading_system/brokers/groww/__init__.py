@@ -1,0 +1,1 @@
+"""Groww read-only adapter."""

@@ -13,6 +13,7 @@ class MarketDataSource(StrEnum):
     """Origin of a market observation."""
 
     LIVE = "live"
+    GROWW_LIVE = "groww_live"
     DELAYED = "delayed"
     HISTORICAL = "historical"
 
@@ -65,6 +66,7 @@ class Instrument(ImmutableModel):
     tick_size: Decimal
     is_reserved: bool = False
     is_buyable: bool = True
+    source: MarketDataSource | None = None
 
 
 class Quote(ImmutableModel):
@@ -98,11 +100,30 @@ class OptionContract(ImmutableModel):
     def tick_size(self) -> Decimal:
         return self.instrument.tick_size
 
+    @property
+    def source(self) -> MarketDataSource | None:
+        return self.instrument.source
+
 
 class OptionChain(ImmutableModel):
     underlying: Instrument
     expiry: date
     contracts: tuple[OptionContract, ...]
+    source: MarketDataSource | None = None
+
+
+class OptionGreeks(ImmutableModel):
+    """Provider-supplied option sensitivities for one normalized contract."""
+
+    instrument: Instrument
+    observed_at: datetime | None = None
+    source: MarketDataSource | None = None
+    delta: Decimal | None = None
+    gamma: Decimal | None = None
+    theta: Decimal | None = None
+    vega: Decimal | None = None
+    rho: Decimal | None = None
+    implied_volatility: Decimal | None = None
 
 
 class MarginSummary(ImmutableModel):
@@ -110,6 +131,7 @@ class MarginSummary(ImmutableModel):
     used_margin: Decimal
     collateral: Decimal = Decimal("0")
     observed_at: datetime | None = None
+    source: MarketDataSource | None = None
 
 
 class Position(ImmutableModel):
@@ -120,6 +142,7 @@ class Position(ImmutableModel):
     realized_pnl: Decimal = Decimal("0")
     unrealized_pnl: Decimal = Decimal("0")
     observed_at: datetime | None = None
+    source: MarketDataSource | None = None
 
 
 class Order(ImmutableModel):
@@ -131,6 +154,8 @@ class Order(ImmutableModel):
     created_at: datetime
     updated_at: datetime
     limit_price: Decimal | None = None
+    segment: str | None = None
+    source: MarketDataSource | None = None
 
 
 class Fill(ImmutableModel):
@@ -140,6 +165,7 @@ class Fill(ImmutableModel):
     quantity: int
     price: Decimal
     filled_at: datetime
+    source: MarketDataSource | None = None
 
 
 class MarketObservation(ImmutableModel):

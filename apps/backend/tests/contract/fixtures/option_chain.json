@@ -1,0 +1,35 @@
+{
+  "underlying_ltp": 24798.25,
+  "strikes": {
+    "24800": {
+      "CE": {
+        "greeks": {
+          "delta": 0.5123,
+          "gamma": 0.0012,
+          "theta": -11.4567,
+          "vega": 18.7654,
+          "rho": 2.3456,
+          "iv": 12.3456
+        },
+        "trading_symbol": "NIFTY26AUG24800CE",
+        "ltp": 132.75,
+        "open_interest": 12345,
+        "volume": 54321
+      },
+      "PE": {
+        "greeks": {
+          "delta": -0.4877,
+          "gamma": 0.0012,
+          "theta": -10.9876,
+          "vega": 18.4321,
+          "rho": -2.1234,
+          "iv": 13.2109
+        },
+        "trading_symbol": "NIFTY26AUG24800PE",
+        "ltp": 125.4,
+        "open_interest": 13579,
+        "volume": 45678
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "positions": [
+    {
+      "trading_symbol": "NIFTY26AUG24800CE",
+      "segment": "FNO",
+      "credit_quantity": 150,
+      "credit_price": 128.5,
+      "debit_quantity": 75,
+      "debit_price": 120.25,
+      "carry_forward_credit_quantity": 75,
+      "carry_forward_credit_price": 126,
+      "carry_forward_debit_quantity": 0,
+      "carry_forward_debit_price": 0,
+      "exchange": "NSE",
+      "symbol_isin": null,
+      "quantity": 75,
+      "product": "NRML",
+      "net_carry_forward_quantity": 75,
+      "net_price": 136.75,
+      "net_carry_forward_price": 126,
+      "realised_pnl": 618.75
+    }
+  ]
+}

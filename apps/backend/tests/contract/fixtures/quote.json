@@ -1,0 +1,37 @@
+{
+  "average_price": 24788.25,
+  "bid_quantity": 825,
+  "bid_price": 24798.1,
+  "day_change": 112.45,
+  "day_change_perc": 0.46,
+  "upper_circuit_limit": 27250,
+  "lower_circuit_limit": 22250,
+  "ohlc": {
+    "open": 24710.2,
+    "high": 24825.4,
+    "low": 24688.65,
+    "close": 24690.75
+  },
+  "depth": {
+    "buy": [{"price": 24798.1, "quantity": 825}],
+    "sell": [{"price": 24798.35, "quantity": 640}]
+  },
+  "high_trade_range": 26040,
+  "implied_volatility": 0,
+  "last_trade_quantity": 1,
+  "last_trade_time": 1785730500000,
+  "low_trade_range": 23560,
+  "last_price": 24798.25,
+  "market_cap": 0,
+  "offer_price": 24798.35,
+  "offer_quantity": 640,
+  "oi_day_change": 0,
+  "oi_day_change_percentage": 0,
+  "open_interest": 0,
+  "previous_open_interest": 0,
+  "total_buy_quantity": 14225,
+  "total_sell_quantity": 13180,
+  "volume": 987654,
+  "week_52_high": 25140.8,
+  "week_52_low": 21910.5
+}

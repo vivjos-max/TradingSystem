@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from trading_system.domain.models import Instrument, MarketDataSource, Quote
+from trading_system.domain.models import Instrument, MarketDataSource, OptionGreeks, Quote
 from trading_system.market.instruments import resolve_nifty_universe
 
 
@@ -189,3 +189,33 @@ def test_normalized_models_persist_aware_timestamps_in_utc():
 
     assert quote.observed_at == datetime(2026, 8, 3, 4, 15, tzinfo=UTC)
     assert quote.observed_at.tzinfo is UTC
+
+
+def test_broker_provenance_extension_is_backward_compatible_and_immutable():
+    legacy = Instrument(
+        instrument_token="legacy",
+        symbol="LEGACY",
+        exchange="NSE",
+        instrument_type="EQ",
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+    )
+    sourced = Instrument(
+        instrument_token="sourced",
+        symbol="SOURCED",
+        exchange="NSE",
+        instrument_type="CE",
+        lot_size=75,
+        tick_size=Decimal("0.05"),
+        source=MarketDataSource.GROWW_LIVE,
+    )
+    greeks = OptionGreeks(
+        instrument=sourced,
+        delta=Decimal("0.5"),
+        source=MarketDataSource.GROWW_LIVE,
+    )
+
+    assert legacy.source is None
+    assert greeks.gamma is None
+    with pytest.raises(ValidationError):
+        greeks.delta = Decimal("0.6")

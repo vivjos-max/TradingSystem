@@ -1,0 +1,32 @@
+{
+  "clear_cash": 123456.78,
+  "net_margin_used": 23456.7,
+  "brokerage_and_charges": 18.25,
+  "collateral_used": 1000,
+  "collateral_available": 5432.1,
+  "adhoc_margin": 250,
+  "fno_margin_details": {
+    "net_fno_margin_used": 21000,
+    "span_margin_used": 15000,
+    "exposure_margin_used": 6000,
+    "future_balance_available": 90000.08,
+    "option_buy_balance_available": 85000.08,
+    "option_sell_balance_available": 75000.08
+  },
+  "equity_margin_details": {
+    "net_equity_margin_used": 2456.7,
+    "cnc_margin_used": 1456.7,
+    "mis_margin_used": 1000,
+    "cnc_balance_available": 95000.08,
+    "mis_balance_available": 92000.08
+  },
+  "commodity_margin_details": {
+    "commodity_span_margin": 3100,
+    "commodity_exposure_margin": 1700,
+    "commodity_tender_margin": 800,
+    "commodity_special_margin": 400,
+    "commodity_additional_margin": 900,
+    "commodity_unrealised_m2m": 275,
+    "commodity_realised_m2m": 325
+  }
+}
