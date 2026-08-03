@@ -11,7 +11,7 @@ from trading_system.api.dependencies import AppContainer
 from trading_system.api.routes.health import (
     SafeUnavailableResponse,
     correlation_id,
-    get_container,
+    get_ready_container,
     unavailable_response,
     utc_now,
 )
@@ -36,11 +36,22 @@ class SystemStatusResponse(BaseModel):
 
 
 _SEVERITY = ("blocked", "stale", "degraded", "market_closed", "live")
+_SERVICE_STATE_TO_SYSTEM_STATE = {
+    "healthy": "live",
+    "live": "live",
+    "market_closed": "market_closed",
+    "degraded": "degraded",
+    "stale": "stale",
+    "unavailable": "blocked",
+    "blocked": "blocked",
+}
 
 
 def _system_state(states: list[str]) -> str:
-    lowered = {state.lower() for state in states}
-    return next((state for state in _SEVERITY if state in lowered), "degraded")
+    normalized = {
+        _SERVICE_STATE_TO_SYSTEM_STATE.get(state.casefold(), "blocked") for state in states
+    }
+    return next((state for state in _SEVERITY if state in normalized), "blocked")
 
 
 router = APIRouter(prefix="/api/v1/system", tags=["system"])
@@ -52,10 +63,8 @@ router = APIRouter(prefix="/api/v1/system", tags=["system"])
     responses={503: {"model": SafeUnavailableResponse}},
 )
 async def status(
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_ready_container),
 ) -> SystemStatusResponse | object:
-    if not container.readiness.is_ready:
-        return unavailable_response()
     try:
         transitions = await container.repository.latest_health_transitions()
     except Exception:

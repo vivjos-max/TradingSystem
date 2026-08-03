@@ -12,7 +12,7 @@ from trading_system.api.dependencies import AppContainer
 from trading_system.api.routes.health import (
     SafeUnavailableResponse,
     correlation_id,
-    get_container,
+    get_ready_container,
     unavailable_response,
     utc_now,
 )
@@ -95,10 +95,8 @@ router = APIRouter(prefix="/api/v1/account", tags=["account"])
     responses={503: {"model": SafeUnavailableResponse}},
 )
 async def account_summary(
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_ready_container),
 ) -> AccountSummaryResponse | object:
-    if not container.readiness.is_ready:
-        return unavailable_response()
     try:
         summary = await container.live_state.get_account_summary(container.account_key)
         if summary is None:
@@ -125,15 +123,18 @@ async def account_summary(
     responses={503: {"model": SafeUnavailableResponse}},
 )
 async def account_orders(
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_ready_container),
 ) -> AccountOrdersResponse | object:
-    if not container.readiness.is_ready:
-        return unavailable_response()
     try:
         snapshots = await container.repository.latest_broker_snapshots("orders")
-        if not snapshots:
+        account_snapshots = [
+            snapshot
+            for snapshot in snapshots
+            if snapshot.snapshot_key == container.account_key
+        ]
+        if not account_snapshots:
             return unavailable_response()
-        snapshot = max(snapshots, key=lambda item: item.observed_at)
+        snapshot = max(account_snapshots, key=lambda item: item.observed_at)
         payload_source = snapshot.raw_payload.get("normalized", snapshot.raw_payload)
         payload = _OrdersPayload.model_validate(payload_source)
     except (AttributeError, TypeError, ValueError, ValidationError):

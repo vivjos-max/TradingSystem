@@ -28,6 +28,10 @@ class SafeUnavailableResponse(BaseModel):
     occurred_at: datetime
 
 
+class ReadinessUnavailable(Exception):
+    """The shared readiness state cannot safely authorize a data response."""
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -45,6 +49,18 @@ def unavailable_response() -> JSONResponse:
 
 def get_container(request: Request) -> AppContainer:
     return request.app.state.container  # type: ignore[no-any-return]
+
+
+async def get_ready_container(request: Request) -> AppContainer:
+    """Refresh separate-process readiness before each protected browser request."""
+    container = get_container(request)
+    try:
+        await container.readiness.restore()
+    except Exception as error:
+        raise ReadinessUnavailable from error
+    if not container.readiness.is_ready:
+        raise ReadinessUnavailable
+    return container
 
 
 router = APIRouter(tags=["health"])
@@ -65,21 +81,23 @@ async def live_head() -> Response:
     response_model=LiveResponse,
     responses={503: {"model": SafeUnavailableResponse}},
 )
-async def ready(container: AppContainer = Depends(get_container)) -> LiveResponse | JSONResponse:
-    if not container.readiness.is_ready:
-        return unavailable_response()
+async def ready(container: AppContainer = Depends(get_ready_container)) -> LiveResponse:
+    del container
     return LiveResponse(status="ready", observed_at=utc_now(), correlation_id=correlation_id())
 
 
 @router.head("/health/ready", include_in_schema=True)
-async def ready_head(container: AppContainer = Depends(get_container)) -> Response:
-    return Response(status_code=200 if container.readiness.is_ready else 503)
+async def ready_head(container: AppContainer = Depends(get_ready_container)) -> Response:
+    del container
+    return Response(status_code=200)
 
 
 __all__ = [
     "SafeUnavailableResponse",
+    "ReadinessUnavailable",
     "correlation_id",
     "get_container",
+    "get_ready_container",
     "router",
     "unavailable_response",
     "utc_now",

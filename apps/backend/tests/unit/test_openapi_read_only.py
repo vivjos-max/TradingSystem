@@ -53,13 +53,46 @@ def app():
 
 def test_openapi_contains_no_mutation_or_execution_surface(app):
     schema = app.openapi()
+    assert set(schema["paths"]) == {
+        "/health/live",
+        "/health/ready",
+        "/api/v1/system/status",
+        "/api/v1/market/nifty",
+        "/api/v1/market/nifty/options",
+        "/api/v1/market/nifty/candles",
+        "/api/v1/account/summary",
+        "/api/v1/account/orders",
+    }
     allowed = {"get", "head", "parameters"}
     for path, path_item in schema["paths"].items():
         assert set(path_item).issubset(allowed), path
         assert not any(
             word in path.lower()
-            for word in ("place", "modify", "cancel", "order-ticket", "execute")
+            for word in (
+                "place",
+                "modify",
+                "cancel",
+                "order-ticket",
+                "execute",
+                "gtt",
+                "oco",
+                "trade",
+                "buy",
+                "sell",
+                "submit",
+            )
         )
     serialized = json.dumps(schema).lower()
-    assert "placeorder" not in serialized
-    assert "createorder" not in serialized
+    assert not any(
+        word in serialized
+        for word in (
+            "placeorder",
+            "createorder",
+            "gtt",
+            "oco",
+            "trade",
+            "buy",
+            "sell",
+            "submit",
+        )
+    )

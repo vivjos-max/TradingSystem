@@ -5,12 +5,17 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from trading_system.api.dependencies import AppContainer
 from trading_system.api.routes.account import router as account_router
-from trading_system.api.routes.health import router as health_router
+from trading_system.api.routes.health import (
+    ReadinessUnavailable,
+    router as health_router,
+    unavailable_response,
+)
 from trading_system.api.routes.market import router as market_router
 from trading_system.api.routes.system import router as system_router
 
@@ -34,6 +39,11 @@ def create_app(container: AppContainer) -> FastAPI:
         title="Trading System Read-Only API", version="0.1.0", lifespan=lifespan
     )
     app.state.container = container
+
+    @app.exception_handler(ReadinessUnavailable)
+    async def readiness_unavailable(_: Request, __: ReadinessUnavailable) -> JSONResponse:
+        return unavailable_response()
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(_LOCAL_DASHBOARD_ORIGINS),

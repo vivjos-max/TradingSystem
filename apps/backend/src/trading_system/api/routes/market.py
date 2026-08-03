@@ -13,7 +13,7 @@ from trading_system.api.dependencies import AppContainer
 from trading_system.api.routes.health import (
     SafeUnavailableResponse,
     correlation_id,
-    get_container,
+    get_ready_container,
     unavailable_response,
     utc_now,
 )
@@ -108,10 +108,8 @@ router = APIRouter(prefix="/api/v1/market", tags=["market"])
     responses={503: {"model": SafeUnavailableResponse}},
 )
 async def nifty_quote(
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_ready_container),
 ) -> NiftyQuoteResponse | object:
-    if not container.readiness.is_ready:
-        return unavailable_response()
     try:
         quote = await container.live_state.get_quote(container.nifty_instrument_key)
         if quote is None:
@@ -137,10 +135,8 @@ async def nifty_quote(
     responses={503: {"model": SafeUnavailableResponse}},
 )
 async def nifty_options(
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_ready_container),
 ) -> NiftyOptionChainResponse | object:
-    if not container.readiness.is_ready:
-        return unavailable_response()
     try:
         chain = await container.live_state.get_option_chain(container.option_chain_key)
         if chain is None:
@@ -175,10 +171,8 @@ async def nifty_options(
 )
 async def nifty_candles(
     interval: Literal["1m", "5m"] = Query(...),
-    container: AppContainer = Depends(get_container),
+    container: AppContainer = Depends(get_ready_container),
 ) -> NiftyCandlesResponse | object:
-    if not container.readiness.is_ready:
-        return unavailable_response()
     try:
         records = await container.repository.latest_candles(finalized=True)
     except Exception:

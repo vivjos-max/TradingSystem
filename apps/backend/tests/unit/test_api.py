@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -8,6 +8,7 @@ import pytest
 
 from trading_system.api.dependencies import AppContainer
 from trading_system.api.main import create_app
+from trading_system.api.routes.system import _system_state
 from trading_system.persistence.postgres import (
     BrokerSnapshotRecord,
     CandleRecord,
@@ -332,6 +333,172 @@ async def test_orders_with_naive_source_timestamps_are_not_exposed() -> None:
         response = await client.get("/api/v1/account/orders")
 
     assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_orders_select_only_the_configured_account_snapshot() -> None:
+    class TwoAccounts(DashboardRepository):
+        async def latest_broker_snapshots(self, snapshot_kind: str) -> list[BrokerSnapshotRecord]:
+            assert snapshot_kind == "orders"
+            return [
+                BrokerSnapshotRecord(
+                    snapshot_kind="orders",
+                    snapshot_key="primary",
+                    source="groww_live",
+                    idempotency_key="ignored",
+                    observed_at=AT,
+                    raw_payload={
+                        "orders": [
+                            {
+                                "order_id": "primary-order",
+                                "instrument_token": "NIFTY26AUG25000CE",
+                                "side": "BUY",
+                                "quantity": 75,
+                                "status": "COMPLETE",
+                                "created_at": "2026-08-03T09:14:00Z",
+                                "updated_at": "2026-08-03T09:15:00Z",
+                            }
+                        ]
+                    },
+                ),
+                BrokerSnapshotRecord(
+                    snapshot_kind="orders",
+                    snapshot_key="secondary",
+                    source="groww_live",
+                    idempotency_key="ignored",
+                    observed_at=AT + timedelta(minutes=1),
+                    raw_payload={
+                        "orders": [
+                            {
+                                "order_id": "secondary-order",
+                                "instrument_token": "NIFTY26AUG25000PE",
+                                "side": "SELL",
+                                "quantity": 75,
+                                "status": "COMPLETE",
+                                "created_at": "2026-08-03T09:15:00Z",
+                                "updated_at": "2026-08-03T09:16:00Z",
+                            }
+                        ]
+                    },
+                ),
+            ]
+
+    app = create_app(
+        AppContainer(readiness=Ready(), repository=TwoAccounts(), live_state=DashboardState())
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.get("/api/v1/account/orders")
+
+    assert response.status_code == 200
+    assert response.json()["orders"][0]["order_id"] == "primary-order"
+
+
+@pytest.mark.asyncio
+async def test_orders_return_503_when_the_configured_account_has_no_snapshot() -> None:
+    class SecondaryOnly(DashboardRepository):
+        async def latest_broker_snapshots(self, snapshot_kind: str) -> list[BrokerSnapshotRecord]:
+            assert snapshot_kind == "orders"
+            return [
+                BrokerSnapshotRecord(
+                    snapshot_kind="orders",
+                    snapshot_key="secondary",
+                    source="groww_live",
+                    idempotency_key="ignored",
+                    observed_at=AT,
+                    raw_payload={"orders": []},
+                )
+            ]
+
+    app = create_app(
+        AppContainer(readiness=Ready(), repository=SecondaryOnly(), live_state=DashboardState())
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.get("/api/v1/account/orders")
+
+    assert response.status_code == 503
+
+
+@pytest.mark.parametrize(
+    ("service_state", "expected_system_state"),
+    [
+        ("healthy", "live"),
+        ("live", "live"),
+        ("market_closed", "market_closed"),
+        ("degraded", "degraded"),
+        ("stale", "stale"),
+        ("unavailable", "blocked"),
+        ("blocked", "blocked"),
+        ("unknown", "blocked"),
+    ],
+)
+def test_system_status_normalizes_every_supported_service_health_state(
+    service_state: str, expected_system_state: str
+) -> None:
+    assert _system_state([service_state]) == expected_system_state
+
+
+@pytest.mark.asyncio
+async def test_readiness_is_refreshed_for_starting_ready_and_blocked_worker_transitions() -> None:
+    class SharedReadiness(NotReady):
+        def __init__(self) -> None:
+            self.shared_ready = False
+            self.cached_ready = False
+
+        @property
+        def is_ready(self) -> bool:
+            return self.cached_ready
+
+        async def restore(self) -> None:
+            self.cached_ready = self.shared_ready
+
+    readiness = SharedReadiness()
+    app = create_app(
+        AppContainer(readiness=readiness, repository=DashboardRepository(), live_state=DashboardState())
+    )
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            readiness.shared_ready = True
+            ready = await client.get("/health/ready")
+            readiness.shared_ready = False
+            blocked = await client.get("/health/ready")
+
+    assert ready.status_code == 200
+    assert blocked.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_readiness_refresh_failure_returns_the_safe_503_even_after_ready() -> None:
+    class FailingRefresh(Ready):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def restore(self) -> None:
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("redis token=must-not-leak")
+
+    readiness = FailingRefresh()
+    app = create_app(
+        AppContainer(readiness=readiness, repository=DashboardRepository(), live_state=DashboardState())
+    )
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            response = await client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert "token" not in response.text.lower()
 
 
 @pytest.mark.asyncio
