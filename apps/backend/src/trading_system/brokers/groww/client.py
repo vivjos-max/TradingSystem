@@ -18,6 +18,7 @@ from trading_system.brokers.groww.normalizers import (
     normalize_orders,
     normalize_positions,
     normalize_quote,
+    validate_groww_segment,
 )
 from trading_system.brokers.ports import BrokerReadPort, BrokerUnavailable
 from trading_system.domain.models import (
@@ -153,14 +154,9 @@ class GrowwReadClient(BrokerReadPort):
         correlation_id = self._correlation_id_factory()
         validated_orders: list[tuple[Order, str]] = []
         for order in orders:
-            segment = order.segment
-            if (
-                not isinstance(order.order_id, str)
-                or not order.order_id.strip()
-                or not isinstance(segment, str)
-                or not segment.strip()
-            ):
+            if not isinstance(order.order_id, str) or not order.order_id.strip():
                 raise self._contract_mismatch(correlation_id)
+            segment = validate_groww_segment(order.segment, correlation_id)
             validated_orders.append((order, segment))
         index = index_instruments(self._load_instruments(correlation_id))
         seen_groww_ids: set[str] = set()

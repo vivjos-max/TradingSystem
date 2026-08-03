@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, MutableSet, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from numbers import Integral
 from typing import Any, TypeAlias
 
@@ -26,6 +27,15 @@ from trading_system.domain.models import (
 
 
 InstrumentIndex: TypeAlias = Mapping[tuple[str, str], Instrument]
+
+
+class GrowwSegment(StrEnum):
+    """Canonical segments corresponding to growwapi 1.5.0's documented constants."""
+
+    CASH = "CASH"
+    COMMODITY = "COMMODITY"
+    CURRENCY = "CURRENCY"
+    FNO = "FNO"
 
 
 def _mismatch(correlation_id: str) -> BrokerUnavailable:
@@ -82,6 +92,16 @@ def _instrument_token(value: object, correlation_id: str) -> str:
     if isinstance(value, Integral) and not isinstance(value, bool):
         return str(value)
     raise _mismatch(correlation_id)
+
+
+def validate_groww_segment(value: object, correlation_id: str) -> str:
+    """Require an exact canonical Groww segment without coercion or normalization."""
+    if not isinstance(value, str):
+        raise _mismatch(correlation_id)
+    try:
+        return GrowwSegment(value).value
+    except ValueError:
+        raise _mismatch(correlation_id) from None
 
 
 def _decimal(value: object, correlation_id: str) -> Decimal:
@@ -356,7 +376,9 @@ def normalize_orders(
                     _required(row, "exchange_time", correlation_id), correlation_id
                 ),
                 limit_price=_optional_decimal(_optional(row, "price"), correlation_id),
-                segment=_text(_required(row, "segment", correlation_id), correlation_id),
+                segment=validate_groww_segment(
+                    _required(row, "segment", correlation_id), correlation_id
+                ),
                 source=MarketDataSource.GROWW_LIVE,
             )
         )
@@ -381,7 +403,9 @@ def normalize_fills(
         returned_order_id = _text(
             _required(row, "groww_order_id", correlation_id), correlation_id
         )
-        returned_segment = _text(_required(row, "segment", correlation_id), correlation_id)
+        returned_segment = validate_groww_segment(
+            _required(row, "segment", correlation_id), correlation_id
+        )
         if returned_order_id != expected_order_id or returned_segment != expected_segment:
             raise _mismatch(correlation_id)
         groww_id_value = _optional(row, "groww_trade_id")

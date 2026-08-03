@@ -121,6 +121,44 @@ def test_orders_rejects_numeric_semantic_strings(field: str, malformed_value: in
     }
 
 
+@pytest.mark.parametrize("malformed_segment", ["INVALID", " FNO ", "fno"])
+def test_orders_rejects_noncanonical_segment(malformed_segment: str) -> None:
+    class MalformedOrderSdk:
+        def get_all_instruments(self) -> pd.DataFrame:
+            return pd.DataFrame(fixture("instruments.json"))
+
+        def get_order_list(self, **kwargs: int) -> dict[str, Any]:
+            payload = fixture("orders.json")
+            payload["order_list"][0]["segment"] = malformed_segment
+            return payload
+
+    with pytest.raises(BrokerUnavailable) as captured:
+        GrowwReadClient(
+            MalformedOrderSdk(), correlation_id_factory=lambda: "corr-canonical-segment"
+        ).orders()
+
+    assert captured.value.code == "GROWW_CONTRACT_MISMATCH"
+    assert captured.value.correlation_id == "corr-canonical-segment"
+
+
+@pytest.mark.parametrize("segment", ["CASH", "COMMODITY", "CURRENCY", "FNO"])
+def test_orders_accepts_exact_documented_segments(segment: str) -> None:
+    class CanonicalOrderSdk:
+        def get_all_instruments(self) -> pd.DataFrame:
+            return pd.DataFrame(fixture("instruments.json"))
+
+        def get_order_list(self, **kwargs: int) -> dict[str, Any]:
+            payload = fixture("orders.json")
+            payload["order_list"][0]["segment"] = segment
+            return payload
+
+    orders = GrowwReadClient(
+        CanonicalOrderSdk(), correlation_id_factory=lambda: "corr-documented-segment"
+    ).orders()
+
+    assert orders[0].segment == segment
+
+
 def test_fills_fetches_only_supplied_orders_with_page_size_50_and_deduplicates_ids() -> None:
     trade = fixture("trades.json")["trade_list"][0]
 
@@ -269,6 +307,45 @@ def test_fills_rejects_non_string_segment_before_trade_sdk_call() -> None:
     assert captured.value.safe_view().model_dump() == {
         "code": "GROWW_CONTRACT_MISMATCH",
         "correlation_id": "corr-non-string-segment",
+        "summary": "Groww returned an unexpected response",
+    }
+
+
+@pytest.mark.parametrize("malformed_segment", ["INVALID", " FNO ", "fno"])
+def test_fills_rejects_noncanonical_segment_before_trade_sdk_call(
+    malformed_segment: str,
+) -> None:
+    class RecordingSdk:
+        trade_call_reached = False
+
+        def get_all_instruments(self) -> pd.DataFrame:
+            return pd.DataFrame(fixture("instruments.json"))
+
+        def get_trade_list_for_order(self, **kwargs: Any) -> dict[str, Any]:
+            self.trade_call_reached = True
+            return fixture("trades.json")
+
+    malformed_order = Order.model_construct(
+        order_id="INVENTED-ORDER-0001",
+        instrument=instrument(),
+        side="BUY",
+        quantity=75,
+        status="COMPLETE",
+        created_at=datetime(2026, 8, 3, 4, 10, tzinfo=UTC),
+        updated_at=datetime(2026, 8, 3, 4, 10, 2, tzinfo=UTC),
+        segment=malformed_segment,
+    )
+    sdk = RecordingSdk()
+
+    with pytest.raises(BrokerUnavailable) as captured:
+        GrowwReadClient(
+            sdk, correlation_id_factory=lambda: "corr-pre-sdk-segment"
+        ).fills((malformed_order,))
+
+    assert sdk.trade_call_reached is False
+    assert captured.value.safe_view().model_dump() == {
+        "code": "GROWW_CONTRACT_MISMATCH",
+        "correlation_id": "corr-pre-sdk-segment",
         "summary": "Groww returned an unexpected response",
     }
 
