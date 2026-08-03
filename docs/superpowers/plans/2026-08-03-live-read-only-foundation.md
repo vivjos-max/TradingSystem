@@ -120,7 +120,7 @@ TradingSystem/
 
 - [ ] **Step 1: Create package metadata and the failing settings test**
 
-Define Python 3.11+ metadata and a `src` package. Pin runtime dependencies exactly to `fastapi==0.139.2`, `pydantic==2.13.4`, `pydantic-settings==2.14.2`, `growwapi==1.5.0`, `sqlalchemy==2.0.51`, `alembic==1.18.5`, `asyncpg==0.31.0`, `redis==8.0.1`, `pyotp==2.10.0`, `pandas==3.0.3`, `pandas-market-calendars==5.4.0`, `uvicorn[standard]==0.51.0`, `httpx==0.28.1`, and `structlog==26.1.0`. Pin development dependencies to `pip-tools==7.6.0`, `pytest==9.1.1`, `pytest-asyncio==1.4.0`, `pytest-cov==7.1.0`, `testcontainers==4.14.2`, `PyYAML==6.0.3`, `ruff==0.15.22`, and `mypy==2.3.0`. Generate `requirements.lock` with hashes using `pip-compile --generate-hashes` and install only from that lock in Docker.
+Define Python 3.11+ metadata and a `src` package. Pin runtime dependencies exactly to `fastapi==0.139.2`, `pydantic==2.13.4`, `pydantic-settings==2.14.2`, `growwapi==1.5.0`, `sqlalchemy==2.0.51`, `alembic==1.18.5`, `asyncpg==0.31.0`, `redis==8.0.1`, `pyotp==2.10.0`, `pandas==2.3.3`, `pandas-market-calendars==5.4.0`, `uvicorn[standard]==0.51.0`, `httpx==0.28.1`, and `structlog==26.1.0`. `pandas==2.3.3` is the newest compatible release below the `pandas<3.0.0` upper bound declared by `growwapi==1.5.0`. Pin development dependencies to `pip-tools==7.6.0`, `pytest==9.1.1`, `pytest-asyncio==1.4.0`, `pytest-cov==7.1.0`, `testcontainers==4.14.2`, `PyYAML==6.0.3`, `ruff==0.15.22`, and `mypy==2.3.0`. Generate `requirements.lock` with hashes using `pip-compile --generate-hashes` and install only from that lock in Docker.
 
 Write tests that construct settings with literal test secrets and assert redaction:
 

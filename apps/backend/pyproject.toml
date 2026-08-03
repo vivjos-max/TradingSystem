@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-system-backend"
+version = "0.1.0"
+description = "Read-only live Groww trading-system backend"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.139.2",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
+    "growwapi==1.5.0",
+    "sqlalchemy==2.0.51",
+    "alembic==1.18.5",
+    "asyncpg==0.31.0",
+    "redis==8.0.1",
+    "pyotp==2.10.0",
+    "pandas==2.3.3",
+    "pandas-market-calendars==5.4.0",
+    "uvicorn[standard]==0.51.0",
+    "httpx==0.28.1",
+    "structlog==26.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pip-tools==7.6.0",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "testcontainers==4.14.2",
+    "PyYAML==6.0.3",
+    "ruff==0.15.22",
+    "mypy==2.3.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.setuptools.packages.find]
+where = ["src"]
