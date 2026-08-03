@@ -151,17 +151,22 @@ class GrowwReadClient(BrokerReadPort):
 
     def fills(self, orders: tuple[Order, ...]) -> tuple[Fill, ...]:
         correlation_id = self._correlation_id_factory()
+        validated_orders: list[tuple[Order, str]] = []
         for order in orders:
-            if order.segment is None:
+            segment = order.segment
+            if (
+                not isinstance(order.order_id, str)
+                or not order.order_id.strip()
+                or not isinstance(segment, str)
+                or not segment.strip()
+            ):
                 raise self._contract_mismatch(correlation_id)
+            validated_orders.append((order, segment))
         index = index_instruments(self._load_instruments(correlation_id))
         seen_groww_ids: set[str] = set()
         seen_exchange_ids: set[str] = set()
         fills: list[Fill] = []
-        for order in orders:
-            segment = order.segment
-            if segment is None:
-                raise self._contract_mismatch(correlation_id)
+        for order, segment in validated_orders:
             payload = self._invoke(
                 correlation_id,
                 self._sdk_client.get_trade_list_for_order,
@@ -175,6 +180,8 @@ class GrowwReadClient(BrokerReadPort):
                     payload,
                     index,
                     correlation_id,
+                    order.order_id,
+                    segment,
                     seen_groww_ids,
                     seen_exchange_ids,
                 )

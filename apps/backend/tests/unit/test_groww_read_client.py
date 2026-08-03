@@ -90,6 +90,37 @@ def test_orders_pages_by_25_until_a_short_page_and_preserves_segment() -> None:
     assert all(order.segment == "FNO" for order in orders)
 
 
+@pytest.mark.parametrize(
+    ("field", "malformed_value"),
+    [
+        ("groww_order_id", 7001),
+        ("transaction_type", 7002),
+        ("order_status", 7003),
+        ("segment", 7004),
+    ],
+)
+def test_orders_rejects_numeric_semantic_strings(field: str, malformed_value: int) -> None:
+    class MalformedOrderSdk:
+        def get_all_instruments(self) -> pd.DataFrame:
+            return pd.DataFrame(fixture("instruments.json"))
+
+        def get_order_list(self, **kwargs: int) -> dict[str, Any]:
+            payload = fixture("orders.json")
+            payload["order_list"][0][field] = malformed_value
+            return payload
+
+    with pytest.raises(BrokerUnavailable) as captured:
+        GrowwReadClient(
+            MalformedOrderSdk(), correlation_id_factory=lambda: "corr-semantic-string"
+        ).orders()
+
+    assert captured.value.safe_view().model_dump() == {
+        "code": "GROWW_CONTRACT_MISMATCH",
+        "correlation_id": "corr-semantic-string",
+        "summary": "Groww returned an unexpected response",
+    }
+
+
 def test_fills_fetches_only_supplied_orders_with_page_size_50_and_deduplicates_ids() -> None:
     trade = fixture("trades.json")["trade_list"][0]
 
@@ -134,6 +165,51 @@ def test_fills_fetches_only_supplied_orders_with_page_size_50_and_deduplicates_i
     ]
 
 
+@pytest.mark.parametrize(
+    ("fixture_name", "unsafe_payload_value"),
+    [
+        ("trades_wrong_order.json", "INVENTED-CROSS-ORDER-SENSITIVE"),
+        ("trades_wrong_segment.json", "CASH"),
+    ],
+)
+def test_fills_rejects_trade_from_another_order_or_segment_without_exposing_payload(
+    fixture_name: str,
+    unsafe_payload_value: str,
+) -> None:
+    class MismatchedFillSdk:
+        def get_all_instruments(self) -> pd.DataFrame:
+            return pd.DataFrame(fixture("instruments.json"))
+
+        def get_trade_list_for_order(self, **kwargs: Any) -> dict[str, Any]:
+            return fixture(fixture_name)
+
+    order = Order(
+        order_id="INVENTED-ORDER-0001",
+        instrument=instrument(),
+        side="BUY",
+        quantity=75,
+        status="COMPLETE",
+        created_at=datetime(2026, 8, 3, 4, 10, tzinfo=UTC),
+        updated_at=datetime(2026, 8, 3, 4, 10, 2, tzinfo=UTC),
+        segment="FNO",
+        source=MarketDataSource.GROWW_LIVE,
+    )
+
+    with pytest.raises(BrokerUnavailable) as captured:
+        GrowwReadClient(
+            MismatchedFillSdk(), correlation_id_factory=lambda: "corr-fill-ownership"
+        ).fills((order,))
+
+    error = captured.value
+    assert error.safe_view().model_dump() == {
+        "code": "GROWW_CONTRACT_MISMATCH",
+        "correlation_id": "corr-fill-ownership",
+        "summary": "Groww returned an unexpected response",
+    }
+    assert unsafe_payload_value not in str(error)
+    assert unsafe_payload_value not in repr(error.safe_view())
+
+
 def test_fills_rejects_order_without_segment_before_calling_sdk() -> None:
     class NoCallSdk:
         def get_trade_list_for_order(self, **kwargs: Any) -> dict[str, Any]:
@@ -157,6 +233,42 @@ def test_fills_rejects_order_without_segment_before_calling_sdk() -> None:
     assert captured.value.safe_view().model_dump() == {
         "code": "GROWW_CONTRACT_MISMATCH",
         "correlation_id": "corr-missing-segment",
+        "summary": "Groww returned an unexpected response",
+    }
+
+
+def test_fills_rejects_non_string_segment_before_trade_sdk_call() -> None:
+    class RecordingSdk:
+        trade_call_reached = False
+
+        def get_all_instruments(self) -> pd.DataFrame:
+            return pd.DataFrame(fixture("instruments.json"))
+
+        def get_trade_list_for_order(self, **kwargs: Any) -> dict[str, Any]:
+            self.trade_call_reached = True
+            return fixture("trades.json")
+
+    malformed_order = Order.model_construct(
+        order_id="INVENTED-ORDER-0001",
+        instrument=instrument(),
+        side="BUY",
+        quantity=75,
+        status="COMPLETE",
+        created_at=datetime(2026, 8, 3, 4, 10, tzinfo=UTC),
+        updated_at=datetime(2026, 8, 3, 4, 10, 2, tzinfo=UTC),
+        segment=7004,
+    )
+    sdk = RecordingSdk()
+
+    with pytest.raises(BrokerUnavailable) as captured:
+        GrowwReadClient(
+            sdk, correlation_id_factory=lambda: "corr-non-string-segment"
+        ).fills((malformed_order,))
+
+    assert sdk.trade_call_reached is False
+    assert captured.value.safe_view().model_dump() == {
+        "code": "GROWW_CONTRACT_MISMATCH",
+        "correlation_id": "corr-non-string-segment",
         "summary": "Groww returned an unexpected response",
     }
 

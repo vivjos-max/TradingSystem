@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pytest
 
 from trading_system.brokers.groww.client import GrowwReadClient
+from trading_system.brokers.ports import BrokerUnavailable
 from trading_system.domain.models import MarketDataSource
 
 
@@ -113,7 +115,7 @@ def test_documented_contract_shapes_normalize_to_immutable_models() -> None:
         "average_price": Decimal("136.75"),
         "last_price": None,
         "realized_pnl": Decimal("618.75"),
-        "unrealized_pnl": Decimal("0"),
+        "unrealized_pnl": None,
         "observed_at": None,
         "source": MarketDataSource.GROWW_LIVE,
     }
@@ -199,3 +201,22 @@ def test_documented_optional_order_price_normalizes_to_none() -> None:
     ).orders()
 
     assert orders[0].limit_price is None
+
+
+def test_missing_documented_realized_pnl_is_a_contract_mismatch_not_zero() -> None:
+    class MissingRealizedPnlSdk(DocumentedGrowwSdk):
+        def get_positions_for_user(self) -> dict[str, Any]:
+            payload = deepcopy(fixture("positions.json"))
+            payload["positions"][0].pop("realised_pnl")
+            return payload
+
+    with pytest.raises(BrokerUnavailable) as captured:
+        GrowwReadClient(
+            MissingRealizedPnlSdk(), correlation_id_factory=lambda: "corr-position-pnl"
+        ).positions()
+
+    assert captured.value.safe_view().model_dump() == {
+        "code": "GROWW_CONTRACT_MISMATCH",
+        "correlation_id": "corr-position-pnl",
+        "summary": "Groww returned an unexpected response",
+    }

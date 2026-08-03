@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, MutableSet, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
+from numbers import Integral
 from typing import Any, TypeAlias
 
 import pandas as pd  # type: ignore[import-untyped]
@@ -69,12 +70,18 @@ def _is_missing(value: object) -> bool:
 
 
 def _text(value: object, correlation_id: str) -> str:
-    if not isinstance(value, (str, int)) or isinstance(value, bool):
+    if not isinstance(value, str) or not value.strip():
         raise _mismatch(correlation_id)
-    result = str(value)
-    if not result:
-        raise _mismatch(correlation_id)
-    return result
+    return value
+
+
+def _instrument_token(value: object, correlation_id: str) -> str:
+    """Normalize the one documented identifier that may be numeric in the SDK DataFrame."""
+    if isinstance(value, str):
+        return _text(value, correlation_id)
+    if isinstance(value, Integral) and not isinstance(value, bool):
+        return str(value)
+    raise _mismatch(correlation_id)
 
 
 def _decimal(value: object, correlation_id: str) -> Decimal:
@@ -142,7 +149,7 @@ def normalize_instruments(payload: object, correlation_id: str) -> tuple[Instrum
         buy_allowed = _optional(row, "buy_allowed")
         normalized.append(
             Instrument(
-                instrument_token=_text(
+                instrument_token=_instrument_token(
                     _required(row, "exchange_token", correlation_id), correlation_id
                 ),
                 symbol=_text(_required(row, "trading_symbol", correlation_id), correlation_id),
@@ -299,7 +306,6 @@ def normalize_positions(
             symbol=_required(row, "trading_symbol", correlation_id),
             correlation_id=correlation_id,
         )
-        realized = _optional(row, "realised_pnl")
         positions.append(
             Position(
                 instrument=instrument,
@@ -308,10 +314,10 @@ def normalize_positions(
                     _required(row, "net_price", correlation_id), correlation_id
                 ),
                 last_price=None,
-                realized_pnl=(
-                    Decimal("0") if realized is None else _decimal(realized, correlation_id)
+                realized_pnl=_decimal(
+                    _required(row, "realised_pnl", correlation_id), correlation_id
                 ),
-                unrealized_pnl=Decimal("0"),
+                unrealized_pnl=None,
                 observed_at=None,
                 source=MarketDataSource.GROWW_LIVE,
             )
@@ -361,6 +367,8 @@ def normalize_fills(
     payload: object,
     index: InstrumentIndex,
     correlation_id: str,
+    expected_order_id: str,
+    expected_segment: str,
     seen_groww_ids: MutableSet[str],
     seen_exchange_ids: MutableSet[str],
 ) -> tuple[Fill, ...]:
@@ -370,6 +378,12 @@ def normalize_fills(
     fills: list[Fill] = []
     for raw in rows:
         row = _mapping(raw, correlation_id)
+        returned_order_id = _text(
+            _required(row, "groww_order_id", correlation_id), correlation_id
+        )
+        returned_segment = _text(_required(row, "segment", correlation_id), correlation_id)
+        if returned_order_id != expected_order_id or returned_segment != expected_segment:
+            raise _mismatch(correlation_id)
         groww_id_value = _optional(row, "groww_trade_id")
         exchange_id_value = _optional(row, "exchange_trade_id")
         groww_id = None if groww_id_value in (None, "") else _text(groww_id_value, correlation_id)
@@ -398,9 +412,7 @@ def normalize_fills(
         fills.append(
             Fill(
                 fill_id=groww_id or exchange_id or "",
-                order_id=_text(
-                    _required(row, "groww_order_id", correlation_id), correlation_id
-                ),
+                order_id=returned_order_id,
                 instrument=instrument,
                 quantity=_integer(_required(row, "quantity", correlation_id), correlation_id),
                 price=_decimal(_required(row, "price", correlation_id), correlation_id),

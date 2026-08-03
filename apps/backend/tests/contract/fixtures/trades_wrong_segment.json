@@ -1,0 +1,23 @@
+{
+  "trade_list": [
+    {
+      "price": 130.75,
+      "isin": null,
+      "quantity": 75,
+      "groww_order_id": "INVENTED-ORDER-0001",
+      "groww_trade_id": "INVENTED-CROSS-SEGMENT-TRADE",
+      "exchange_trade_id": "INVENTED-CROSS-SEGMENT-EXCHANGE-TRADE",
+      "exchange_order_id": "INVENTED-CROSS-SEGMENT-EXCHANGE-ORDER",
+      "trade_status": "EXECUTED",
+      "trading_symbol": "NIFTY26AUG24800CE",
+      "remark": "Invented mismatched-segment fixture fill",
+      "exchange": "NSE",
+      "segment": "CASH",
+      "product": "CNC",
+      "transaction_type": "BUY",
+      "created_at": "2026-08-03T04:10:02Z",
+      "trade_date_time": "2026-08-03T04:10:02Z",
+      "settlement_number": "INVENTED-SETTLEMENT-WRONG-SEGMENT"
+    }
+  ]
+}

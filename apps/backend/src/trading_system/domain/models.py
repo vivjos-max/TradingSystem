@@ -140,7 +140,7 @@ class Position(ImmutableModel):
     average_price: Decimal
     last_price: Decimal | None = None
     realized_pnl: Decimal = Decimal("0")
-    unrealized_pnl: Decimal = Decimal("0")
+    unrealized_pnl: Decimal | None = None
     observed_at: datetime | None = None
     source: MarketDataSource | None = None
 
