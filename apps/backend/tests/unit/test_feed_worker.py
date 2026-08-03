@@ -371,6 +371,42 @@ async def test_callbacks_normalize_index_value_and_derivative_ltp_to_utc() -> No
 
 
 @pytest.mark.asyncio
+async def test_nearest_future_callback_populates_the_explicit_api_lookup_key() -> None:
+    feed = FakeFeed(index_payload={}, ltp_payload=ltp_payload())
+    repository = MemoryRepository()
+    redis_state = MemoryRedisState()
+    readiness = ReadinessCoordinator(redis_state, clock=lambda: AT)
+    await readiness.dependencies_ready()
+    await readiness.reconciled()
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: feed,
+        index=INDEX,
+        derivatives=(FUTURE,),
+        repository=repository,
+        redis_state=redis_state,
+        candle_builder=RecordingCandleBuilder(),
+        readiness=readiness,
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+        reconcile=successful_reconciliation,
+        quote_key=lambda item: (
+            "nifty-nearest-future"
+            if item.instrument_token == FUTURE.instrument_token
+            else item.instrument_token
+        ),
+    )
+
+    await run_until_then_stop(
+        worker, lambda: "nifty-nearest-future" in redis_state.quotes
+    )
+
+    future_state = redis_state.quotes["nifty-nearest-future"]
+    assert future_state.instrument_key == FUTURE.instrument_token
+
+
+@pytest.mark.asyncio
 async def test_duplicate_callback_remains_one_logical_durable_and_candle_event() -> None:
     feed = FakeFeed(index_payload=index_payload(), index_callback_count=2)
     repository = MemoryRepository()

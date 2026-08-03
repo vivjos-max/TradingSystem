@@ -136,6 +136,7 @@ class GrowwFeedWorker:
         stale_after_seconds: int,
         reconcile: Callable[[], Awaitable[object]] | None = None,
         queue_capacity: int = 1024,
+        quote_key: Callable[[Instrument], str] = lambda instrument: instrument.instrument_token,
     ) -> None:
         if stale_after_seconds <= 0:
             raise ValueError("stale_after_seconds must be positive")
@@ -154,6 +155,7 @@ class GrowwFeedWorker:
         self._clock = clock
         self._stale_after_seconds = stale_after_seconds
         self._reconcile = reconcile
+        self._quote_key = quote_key
         self._active_feed: GrowwFeed | None = None
         self._index_subscribed = False
         self._derivatives_subscribed = False
@@ -453,7 +455,7 @@ class GrowwFeedWorker:
                 self._last_valid_update_at = arrival
                 self._stale = False
             await self._redis_state.set_quote(
-                instrument.instrument_token,
+                self._quote_key(instrument),
                 QuoteState(
                     instrument_key=instrument.instrument_token,
                     observed_at=observed_at,

@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     redis_password: SecretStr | None = None
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+    cors_origins: tuple[str, ...] = (
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+    )
     market_timezone: str = "Asia/Kolkata"
     feed_stale_seconds: int = 10
     quote_stale_seconds: int = 15

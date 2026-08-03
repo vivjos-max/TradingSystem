@@ -1,0 +1,138 @@
+name: trading-system-read-only
+
+x-backend-build: &backend-build
+  context: .
+  dockerfile: apps/backend/Dockerfile
+
+x-database-environment: &database-environment
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ${POSTGRES_DB:-trading_system}
+  POSTGRES_USER: ${POSTGRES_USER:-trading_system}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dashboard}
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8000
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8000
+    command: ["pnpm", "exec", "next", "start", "-H", "0.0.0.0", "-p", "3000"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    restart: "no"
+
+  api:
+    image: trading-system-read-only-backend:local
+    build: *backend-build
+    environment:
+      <<: *database-environment
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      CORS_ORIGINS: '["http://127.0.0.1:3000","http://localhost:3000"]'
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        python -m trading_system.operations migrate &&
+        exec uvicorn trading_system.api.runtime:app --host 0.0.0.0 --port 8000
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    restart: "no"
+
+  worker:
+    image: trading-system-read-only-backend:local
+    build: *backend-build
+    environment:
+      <<: *database-environment
+      GROWW_TOTP_TOKEN: ${GROWW_TOTP_TOKEN:-}
+      GROWW_TOTP_SECRET: ${GROWW_TOTP_SECRET:-}
+    command: ["python", "-m", "trading_system.worker.runtime"]
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: "no"
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trading_system}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_system}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dashboard}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-}
+    command:
+      - /bin/sh
+      - -c
+      - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:

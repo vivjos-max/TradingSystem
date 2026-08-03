@@ -70,6 +70,10 @@ class AppContainer:
     nifty_instrument_key: str = "NIFTY50"
     option_chain_key: str = "nifty-current"
     account_key: str = "primary"
+    cors_origins: tuple[str, ...] = (
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+    )
 
 
 __all__ = [

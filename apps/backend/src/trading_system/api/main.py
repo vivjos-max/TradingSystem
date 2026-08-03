@@ -46,7 +46,9 @@ def create_app(container: AppContainer) -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=list(_LOCAL_DASHBOARD_ORIGINS),
+        allow_origins=list(
+            getattr(container, "cors_origins", _LOCAL_DASHBOARD_ORIGINS)
+        ),
         allow_credentials=False,
         allow_methods=["GET", "HEAD"],
         allow_headers=[],

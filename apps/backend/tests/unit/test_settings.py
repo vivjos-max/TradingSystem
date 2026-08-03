@@ -51,3 +51,20 @@ def test_get_settings_redacts_sensitive_validation_input(monkeypatch):
         assert secret not in serialized
     assert "postgres_port" in rendered
     assert "int_parsing" in serialized
+
+
+def test_api_accepts_explicit_local_cors_origins_without_groww_credentials(monkeypatch):
+    monkeypatch.setenv(
+        "CORS_ORIGINS",
+        '["http://127.0.0.1:3000","http://localhost:3000"]',
+    )
+    monkeypatch.delenv("GROWW_TOTP_TOKEN", raising=False)
+    monkeypatch.delenv("GROWW_TOTP_SECRET", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.cors_origins == (
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+    )
+    assert settings.safe_view().groww_credentials_configured is False
