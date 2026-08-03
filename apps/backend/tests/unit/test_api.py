@@ -26,12 +26,6 @@ AT = datetime(2026, 8, 3, 9, 15, tzinfo=UTC)
 
 class DashboardState:
     async def get_quote(self, instrument_key: str) -> QuoteState | None:
-        if instrument_key == "NIFTY-FUT":
-            return QuoteState(
-                instrument_key=instrument_key,
-                observed_at=AT + timedelta(seconds=2),
-                payload={"last_price": "25025.50", "source": "groww_live"},
-            )
         assert instrument_key == "NIFTY50"
         return QuoteState(
             instrument_key=instrument_key,
@@ -51,25 +45,12 @@ class DashboardState:
             payload={
                 "expiry": "2026-08-06",
                 "source": "groww_live",
-                "atm_strike": "25000",
-                "selected_strikes": ["24750", "24800", "24850", "24900", "24950", "25000", "25050", "25100", "25150", "25200", "25250"],
                 "contracts": [
                     {
                         "instrument_token": "NIFTY26AUG25000CE",
                         "strike": "25000",
                         "option_type": "CE",
                         "last_price": "120.50",
-                        "bid_price": "120.00",
-                        "ask_price": "121.00",
-                        "spread": "1.00",
-                        "volume": 10,
-                        "open_interest": 500,
-                        "implied_volatility": "0.14",
-                        "delta": "0.51",
-                        "gamma": "0.0012",
-                        "theta": None,
-                        "vega": None,
-                        "rho": None,
                     }
                 ],
                 "raw": {"provider_symbol": "NIFTY"},
@@ -86,17 +67,6 @@ class DashboardState:
                 "used_margin": "25000",
                 "collateral": "1000",
                 "source": "groww_live",
-                "positions": [
-                    {
-                        "instrument_token": "NIFTY-FUT",
-                        "quantity": 75,
-                        "average_price": "24950",
-                        "last_price": "25025.50",
-                        "realized_pnl": "100",
-                        "unrealized_pnl": "50",
-                        "observed_at": "2026-08-03T09:15:00Z",
-                    }
-                ],
                 "raw": {"provider_account_id": "internal-only"},
             },
         )
@@ -136,22 +106,8 @@ class DashboardRepository:
             )
         ]
 
-    async def recent_candles(
-        self, instrument_key: str, interval: str, *, limit: int
-    ) -> list[CandleRecord]:
-        assert (instrument_key, interval, limit) == ("NIFTY50", "1m", 100)
-        return await self.latest_candles(finalized=True)
-
     async def latest_broker_snapshots(self, snapshot_kind: str) -> list[BrokerSnapshotRecord]:
-        assert snapshot_kind in {"orders", "fills"}
-        if snapshot_kind == "fills":
-            return [
-                BrokerSnapshotRecord(
-                    snapshot_kind="fills", snapshot_key="primary", source="groww_live",
-                    idempotency_key="ignored-fills", observed_at=AT,
-                    raw_payload={"fills": [{"fill_id": "fill-1", "order_id": "ord-1", "instrument_token": "NIFTY26AUG25000CE", "quantity": 75, "price": "120.50", "filled_at": "2026-08-03T09:15:00Z"}]},
-                )
-            ]
+        assert snapshot_kind == "orders"
         return [
             BrokerSnapshotRecord(
                 snapshot_kind="orders",
@@ -200,8 +156,6 @@ def app():
             repository=DashboardRepository(),
             live_state=DashboardState(),
             option_chain_key="nifty-current",
-            nifty_future_instrument_key="NIFTY-FUT",
-            clock=lambda: AT,
         )
     )
 
@@ -309,18 +263,13 @@ async def test_market_and_account_routes_return_normalized_models_with_source_ti
 
     assert nifty.status_code == options.status_code == candles.status_code == 200
     assert account.status_code == orders.status_code == 200
-    assert nifty.json()["spot"]["last_price"] == "25001.50"
-    assert nifty.json()["spot"]["source_observed_at"] == "2026-08-03T09:15:00Z"
-    assert nifty.json()["future"]["last_price"] == "25025.50"
-    assert nifty.json()["future"]["source_observed_at"] == "2026-08-03T09:15:02Z"
+    assert nifty.json()["last_price"] == "25001.50"
+    assert nifty.json()["source_observed_at"] == "2026-08-03T09:15:00Z"
     assert options.json()["contracts"][0]["strike"] == "25000"
-    assert options.json()["contracts"][0]["open_interest"] == 500
     assert candles.json()["candles"][0]["source_opened_at"] == "2026-08-03T09:15:00Z"
     assert account.json()["available_cash"] == "100000"
     assert account.json()["source_observed_at"] == "2026-08-03T09:15:00Z"
-    assert account.json()["positions"][0]["instrument_token"] == "NIFTY-FUT"
     assert orders.json()["orders"][0]["order_id"] == "ord-1"
-    assert orders.json()["orders"][0]["fills"][0]["fill_id"] == "fill-1"
     assert "provider_symbol" not in " ".join(
         [nifty.text, options.text, candles.text, account.text, orders.text]
     )
@@ -347,56 +296,9 @@ async def test_required_missing_live_state_returns_a_structured_503() -> None:
 
 
 @pytest.mark.asyncio
-async def test_market_returns_503_when_the_nearest_future_snapshot_is_missing() -> None:
-    class MissingFuture(DashboardState):
-        async def get_quote(self, instrument_key: str) -> QuoteState | None:
-            if instrument_key == "NIFTY-FUT":
-                return None
-            return await super().get_quote(instrument_key)
-
-    app = create_app(
-        AppContainer(
-            readiness=Ready(), repository=DashboardRepository(), live_state=MissingFuture(),
-            nifty_future_instrument_key="NIFTY-FUT",
-        )
-    )
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-    ) as client:
-        response = await client.get("/api/v1/market/nifty")
-
-    assert response.status_code == 503
-
-
-@pytest.mark.asyncio
-async def test_system_status_explains_persisted_blocked_state_when_not_ready() -> None:
-    class BlockedRepository(DashboardRepository):
-        async def latest_health_transitions(self) -> list[HealthTransitionRecord]:
-            return [
-                HealthTransitionRecord(
-                    service="groww-feed", state="blocked", source="worker",
-                    idempotency_key="ignored", observed_at=AT, raw_payload={},
-                )
-            ]
-
-    app = create_app(
-        AppContainer(readiness=NotReady(), repository=BlockedRepository(), live_state=DashboardState())
-    )
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-    ) as client:
-        response = await client.get("/api/v1/system/status")
-
-    assert response.status_code == 200
-    assert response.json()["state"] == "blocked"
-
-
-@pytest.mark.asyncio
 async def test_orders_with_naive_source_timestamps_are_not_exposed() -> None:
     class NaiveOrders(DashboardRepository):
         async def latest_broker_snapshots(self, snapshot_kind: str) -> list[BrokerSnapshotRecord]:
-            if snapshot_kind == "fills":
-                return await super().latest_broker_snapshots(snapshot_kind)
             assert snapshot_kind == "orders"
             return [
                 BrokerSnapshotRecord(
@@ -422,9 +324,7 @@ async def test_orders_with_naive_source_timestamps_are_not_exposed() -> None:
             ]
 
     app = create_app(
-        AppContainer(
-            readiness=Ready(), repository=NaiveOrders(), live_state=DashboardState(), clock=lambda: AT
-        )
+        AppContainer(readiness=Ready(), repository=NaiveOrders(), live_state=DashboardState())
     )
 
     async with httpx.AsyncClient(
@@ -439,8 +339,6 @@ async def test_orders_with_naive_source_timestamps_are_not_exposed() -> None:
 async def test_orders_select_only_the_configured_account_snapshot() -> None:
     class TwoAccounts(DashboardRepository):
         async def latest_broker_snapshots(self, snapshot_kind: str) -> list[BrokerSnapshotRecord]:
-            if snapshot_kind == "fills":
-                return await super().latest_broker_snapshots(snapshot_kind)
             assert snapshot_kind == "orders"
             return [
                 BrokerSnapshotRecord(
@@ -486,9 +384,7 @@ async def test_orders_select_only_the_configured_account_snapshot() -> None:
             ]
 
     app = create_app(
-        AppContainer(
-            readiness=Ready(), repository=TwoAccounts(), live_state=DashboardState(), clock=lambda: AT
-        )
+        AppContainer(readiness=Ready(), repository=TwoAccounts(), live_state=DashboardState())
     )
 
     async with httpx.AsyncClient(

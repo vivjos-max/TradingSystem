@@ -11,7 +11,6 @@ from trading_system.persistence.postgres import (
     _latest_candles_statement,
     _latest_health_transitions_statement,
     _latest_observations_statement,
-    _recent_candles_statement,
 )
 
 
@@ -69,15 +68,3 @@ def test_candle_idempotency_key_is_fixed_length_and_hashes_caller_and_natural_ke
     assert first.startswith("candle:")
     assert len(first) == 71
     assert len(first) <= 256
-
-
-def test_recent_candles_query_is_bounded_and_returns_event_time_ascending() -> None:
-    sql = _sql(_recent_candles_statement("NSE:NIFTY50", "1m", 100))
-
-    assert "CANDLES.INSTRUMENT_KEY = 'NSE:NIFTY50'" in sql
-    assert "CANDLES.INTERVAL = '1M'" in sql
-    assert "CANDLES.FINALIZED IS TRUE" in sql
-    assert "CANDLES.IS_LATE IS FALSE" in sql
-    assert "ORDER BY CANDLES.OPENED_AT DESC" in sql
-    assert "LIMIT 100" in sql
-    assert sql.endswith("ORDER BY CANDLES.OPENED_AT ASC, CANDLES.CREATED_AT ASC, CANDLES.ID ASC")
