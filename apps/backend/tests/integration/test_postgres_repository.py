@@ -10,7 +10,7 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
-from testcontainers.postgres import PostgresContainer
+from testcontainers.postgres import PostgresContainer  # type: ignore[import-untyped]
 
 from trading_system.persistence.postgres import CandleInput, PostgresRepository
 
@@ -231,3 +231,43 @@ async def test_maximum_caller_candle_key_remains_bounded_and_idempotent(
     assert await repository.save_candles(
         source="groww_live", idempotency_key=maximum_caller_key, candles=[candle]
     ) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_recent_candles_returns_bounded_rows_in_open_time_order(
+    repository: PostgresRepository,
+) -> None:
+    base = datetime(2026, 8, 3, 11, 0, tzinfo=UTC)
+    candles = [
+        CandleInput(
+            instrument_key="TEST:RECENT:NIFTY",
+            interval="1m",
+            opened_at=base + timedelta(minutes=offset),
+            closed_at=base + timedelta(minutes=offset + 1),
+            open=Decimal(str(25000 + offset)),
+            high=Decimal(str(25001 + offset)),
+            low=Decimal(str(24999 + offset)),
+            close=Decimal(str(25000 + offset)),
+            volume=offset,
+            finalized=True,
+            is_late=False,
+            raw_payload={"sequence": offset},
+        )
+        for offset in range(4)
+    ]
+    assert await repository.save_candles(
+        source="groww_live",
+        idempotency_key="recent-candles-regression",
+        candles=candles,
+    ) == 4
+
+    recent = await repository.recent_candles(
+        instrument_key="TEST:RECENT:NIFTY", interval="1m", limit=2
+    )
+
+    assert [row.opened_at for row in recent] == [
+        base + timedelta(minutes=2),
+        base + timedelta(minutes=3),
+    ]
+    assert [row.raw_payload for row in recent] == [{"sequence": 2}, {"sequence": 3}]

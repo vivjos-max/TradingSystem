@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -22,6 +23,9 @@ class _UnusedRepository:
         return []
 
     async def latest_candles(self, *, finalized=None):
+        return []
+
+    async def recent_candles(self, *, instrument_key, interval, limit):
         return []
 
     async def latest_broker_snapshots(self, snapshot_kind):
@@ -46,7 +50,11 @@ class _UnusedLiveState:
 def app():
     return create_app(
         AppContainer(
-            readiness=_Ready(), repository=_UnusedRepository(), live_state=_UnusedLiveState()
+            readiness=_Ready(),
+            repository=_UnusedRepository(),
+            live_state=_UnusedLiveState(),
+            nifty_future_instrument_key="TEST-NEAREST-FUTURE",
+            clock=lambda: datetime(2026, 8, 3, tzinfo=UTC),
         )
     )
 

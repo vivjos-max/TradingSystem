@@ -1,8 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy.dialects import postgresql
 
+from trading_system.persistence import postgres as postgres_module
 from trading_system.persistence.postgres import (
     CandleInput,
     _candle_idempotency_key,
@@ -14,7 +16,7 @@ from trading_system.persistence.postgres import (
 )
 
 
-def _sql(statement: object) -> str:
+def _sql(statement: Any) -> str:
     compiled = statement.compile(
         dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
     )
@@ -68,3 +70,17 @@ def test_candle_idempotency_key_is_fixed_length_and_hashes_caller_and_natural_ke
     assert first.startswith("candle:")
     assert len(first) == 71
     assert len(first) <= 256
+
+
+def test_recent_candle_read_is_filtered_deterministic_and_bounded() -> None:
+    statement_factory = getattr(postgres_module, "_recent_candles_statement", None)
+    assert callable(statement_factory), "recent candle statement is missing"
+
+    sql = _sql(statement_factory("TEST:NIFTY", "1m", 100))
+
+    assert "CANDLES.INSTRUMENT_KEY = 'TEST:NIFTY'" in sql
+    assert "CANDLES.INTERVAL = '1M'" in sql
+    assert "CANDLES.FINALIZED IS TRUE" in sql
+    assert "CANDLES.IS_LATE IS FALSE" in sql
+    assert "ORDER BY CANDLES.OPENED_AT DESC, CANDLES.CREATED_AT DESC, CANDLES.ID DESC" in sql
+    assert "LIMIT 100" in sql

@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from trading_system.api.dependencies import AppContainer
 from trading_system.api.routes.health import (
@@ -26,13 +26,20 @@ class _QuotePayload(BaseModel):
     source: str
 
 
-class NiftyQuoteResponse(BaseModel):
+class QuoteSnapshotResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     instrument_key: str
     last_price: Decimal
     source: str
     source_observed_at: datetime
+
+
+class NiftyQuoteResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    spot: QuoteSnapshotResponse
+    nearest_future: QuoteSnapshotResponse
     served_at: datetime
     correlation_id: str
 
@@ -42,8 +49,19 @@ class _OptionContractPayload(BaseModel):
 
     instrument_token: str
     strike: Decimal
-    option_type: str
-    last_price: Decimal | None = None
+    option_type: Literal["CE", "PE"]
+    ltp: Decimal | None = None
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    spread: Decimal | None = None
+    volume: int | None = None
+    open_interest: int | None = None
+    implied_volatility: Decimal | None = None
+    delta: Decimal | None = None
+    gamma: Decimal | None = None
+    theta: Decimal | None = None
+    vega: Decimal | None = None
+    rho: Decimal | None = None
 
 
 class _OptionChainPayload(BaseModel):
@@ -51,7 +69,18 @@ class _OptionChainPayload(BaseModel):
 
     expiry: str
     source: str
+    atm_strike: Decimal
+    selected_strikes: list[Decimal]
     contracts: list[_OptionContractPayload]
+
+    @model_validator(mode="after")
+    def window_is_exactly_atm_plus_five_each_side(self) -> _OptionChainPayload:
+        strikes = self.selected_strikes
+        if len(strikes) != 11 or len(set(strikes)) != 11:
+            raise ValueError("selected_strikes must contain 11 unique strikes")
+        if strikes != sorted(strikes) or strikes[5] != self.atm_strike:
+            raise ValueError("selected_strikes must be ordered and centered on ATM")
+        return self
 
 
 class OptionContractResponse(BaseModel):
@@ -60,7 +89,18 @@ class OptionContractResponse(BaseModel):
     instrument_token: str
     strike: Decimal
     option_type: str
-    last_price: Decimal | None
+    ltp: Decimal | None
+    bid: Decimal | None
+    ask: Decimal | None
+    spread: Decimal | None
+    volume: int | None
+    open_interest: int | None
+    implied_volatility: Decimal | None
+    delta: Decimal | None
+    gamma: Decimal | None
+    theta: Decimal | None
+    vega: Decimal | None
+    rho: Decimal | None
 
 
 class NiftyOptionChainResponse(BaseModel):
@@ -69,6 +109,8 @@ class NiftyOptionChainResponse(BaseModel):
     expiry: str
     source: str
     source_observed_at: datetime
+    atm_strike: Decimal
+    selected_strikes: list[Decimal]
     contracts: list[OptionContractResponse]
     served_at: datetime
     correlation_id: str
@@ -100,6 +142,7 @@ class NiftyCandlesResponse(BaseModel):
 
 
 router = APIRouter(prefix="/api/v1/market", tags=["market"])
+_RECENT_CANDLE_LIMIT = 100
 
 
 @router.get(
@@ -111,19 +154,31 @@ async def nifty_quote(
     container: AppContainer = Depends(get_ready_container),
 ) -> NiftyQuoteResponse | object:
     try:
-        quote = await container.live_state.get_quote(container.nifty_instrument_key)
-        if quote is None:
+        spot = await container.live_state.get_quote(container.nifty_instrument_key)
+        future = await container.live_state.get_quote(
+            container.nifty_future_instrument_key
+        )
+        if spot is None or future is None:
             return unavailable_response()
-        payload = _QuotePayload.model_validate(quote.payload)
+        spot_payload = _QuotePayload.model_validate(spot.payload)
+        future_payload = _QuotePayload.model_validate(future.payload)
     except (TypeError, ValueError, ValidationError):
         return unavailable_response()
     except Exception:
         return unavailable_response()
     return NiftyQuoteResponse(
-        instrument_key=quote.instrument_key,
-        last_price=payload.last_price,
-        source=payload.source,
-        source_observed_at=quote.observed_at,
+        spot=QuoteSnapshotResponse(
+            instrument_key=spot.instrument_key,
+            last_price=spot_payload.last_price,
+            source=spot_payload.source,
+            source_observed_at=spot.observed_at,
+        ),
+        nearest_future=QuoteSnapshotResponse(
+            instrument_key=future.instrument_key,
+            last_price=future_payload.last_price,
+            source=future_payload.source,
+            source_observed_at=future.observed_at,
+        ),
         served_at=utc_now(),
         correlation_id=correlation_id(),
     )
@@ -150,14 +205,28 @@ async def nifty_options(
         expiry=payload.expiry,
         source=payload.source,
         source_observed_at=chain.observed_at,
+        atm_strike=payload.atm_strike,
+        selected_strikes=payload.selected_strikes,
         contracts=[
             OptionContractResponse(
                 instrument_token=contract.instrument_token,
                 strike=contract.strike,
                 option_type=contract.option_type,
-                last_price=contract.last_price,
+                ltp=contract.ltp,
+                bid=contract.bid,
+                ask=contract.ask,
+                spread=contract.spread,
+                volume=contract.volume,
+                open_interest=contract.open_interest,
+                implied_volatility=contract.implied_volatility,
+                delta=contract.delta,
+                gamma=contract.gamma,
+                theta=contract.theta,
+                vega=contract.vega,
+                rho=contract.rho,
             )
             for contract in payload.contracts
+            if contract.strike in set(payload.selected_strikes)
         ],
         served_at=utc_now(),
         correlation_id=correlation_id(),
@@ -174,7 +243,11 @@ async def nifty_candles(
     container: AppContainer = Depends(get_ready_container),
 ) -> NiftyCandlesResponse | object:
     try:
-        records = await container.repository.latest_candles(finalized=True)
+        records = await container.repository.recent_candles(
+            instrument_key=container.nifty_instrument_key,
+            interval=interval,
+            limit=_RECENT_CANDLE_LIMIT,
+        )
     except Exception:
         return unavailable_response()
     candles = [
@@ -192,7 +265,6 @@ async def nifty_candles(
             source=record.source,
         )
         for record in records
-        if record.instrument_key == container.nifty_instrument_key and record.interval == interval
     ]
     if not candles:
         return unavailable_response()

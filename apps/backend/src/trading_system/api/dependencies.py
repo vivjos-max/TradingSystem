@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import datetime
+from typing import Callable, Protocol
 
 from trading_system.persistence.postgres import (
     BrokerSnapshotRecord,
@@ -48,6 +49,10 @@ class DashboardRepositoryPort(Protocol):
 
     async def latest_candles(self, *, finalized: bool | None = None) -> list[CandleRecord]: ...
 
+    async def recent_candles(
+        self, *, instrument_key: str, interval: str, limit: int
+    ) -> list[CandleRecord]: ...
+
     async def latest_broker_snapshots(
         self, snapshot_kind: str
     ) -> list[BrokerSnapshotRecord]: ...
@@ -60,6 +65,8 @@ class AppContainer:
     readiness: ReadinessPort
     repository: DashboardRepositoryPort
     live_state: LiveDashboardStatePort
+    nifty_future_instrument_key: str
+    clock: Callable[[], datetime]
     nifty_instrument_key: str = "NIFTY50"
     option_chain_key: str = "nifty-current"
     account_key: str = "primary"
