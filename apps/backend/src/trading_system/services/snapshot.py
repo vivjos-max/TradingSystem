@@ -16,6 +16,7 @@ from trading_system.domain.models import (
     Instrument,
     MarginSummary,
     OptionChain,
+    OptionGreeks,
     Order,
     Position,
     Quote,
@@ -36,6 +37,7 @@ class SnapshotBundle:
     positions: tuple[Position, ...]
     orders: tuple[Order, ...]
     fills: tuple[Fill, ...]
+    greeks: tuple[OptionGreeks, ...]
     refreshed_at: datetime
 
 
@@ -101,6 +103,7 @@ class SnapshotService:
         option = self._broker.option_chain(
             _nearest_nifty_option_expiry(instruments, self._clock())
         )
+        greeks = self._broker.greeks(option.contracts)
         refreshed_at = self._clock()
         if refreshed_at.tzinfo is None or refreshed_at.utcoffset() is None:
             raise ValueError("clock must return a timezone-aware datetime")
@@ -112,6 +115,7 @@ class SnapshotService:
             positions=positions,
             orders=orders,
             fills=fills,
+            greeks=greeks,
             refreshed_at=refreshed_at.astimezone(UTC),
         )
 

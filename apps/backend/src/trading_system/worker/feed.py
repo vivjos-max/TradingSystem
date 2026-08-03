@@ -6,12 +6,11 @@ import asyncio
 import inspect
 import random
 from collections.abc import Awaitable, Callable
-from concurrent.futures import Future
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
-from threading import Lock
 from typing import Any, Protocol
 
 from pydantic import JsonValue
@@ -98,9 +97,21 @@ class CandleBuilderPort(Protocol):
 
 
 class ReadinessPort(Protocol):
+    async def dependencies_ready(self) -> None: ...
+
+    async def reconciled(self) -> None: ...
+
     async def first_live_update(self) -> None: ...
 
     async def dependency_blocked(self, dependency: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _FeedMessage:
+    response: dict[str, Any]
+    instruments: tuple[Instrument, ...]
+    price_field: str
+    generation: int
 
 
 class GrowwFeedWorker:
@@ -123,9 +134,13 @@ class GrowwFeedWorker:
         ),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         stale_after_seconds: int,
+        reconcile: Callable[[], Awaitable[object]] | None = None,
+        queue_capacity: int = 1024,
     ) -> None:
         if stale_after_seconds <= 0:
             raise ValueError("stale_after_seconds must be positive")
+        if queue_capacity <= 0:
+            raise ValueError("queue_capacity must be positive")
         self._feed_factory = feed_factory
         self._index = index
         self._derivatives = derivatives
@@ -138,46 +153,62 @@ class GrowwFeedWorker:
         self._jitter = jitter
         self._clock = clock
         self._stale_after_seconds = stale_after_seconds
+        self._reconcile = reconcile
         self._active_feed: GrowwFeed | None = None
-        self._subscribed = False
+        self._index_subscribed = False
+        self._derivatives_subscribed = False
         self._stopped = False
         self._last_valid_update_at: datetime | None = None
+        self._subscription_established_at: datetime | None = None
         self._stale = False
-        self._callback_futures: list[Future[None]] = []
-        self._callback_lock = Lock()
+        self._needs_reconciliation = False
+        self._generation = 0
+        self._generation_failed = False
+        self._queue: asyncio.Queue[_FeedMessage] = asyncio.Queue(maxsize=queue_capacity)
+        self._transition_lock = asyncio.Lock()
+        self._latest_event_at: dict[str, datetime] = {}
+        self._reconnect_attempt = 0
 
     async def run(self) -> None:
         """Run blocking feed consumption in a worker thread with reconnects."""
         if self._stopped:
             return
         monitor = asyncio.create_task(self._monitor_staleness())
+        consumer = asyncio.create_task(self._consume_messages())
         try:
             loop = asyncio.get_running_loop()
-            reconnect_attempt = 0
             while not self._stopped:
-                feed = self._feed_factory()
-                self._active_feed = feed
-                await self._subscribe(feed, loop)
                 try:
+                    await self._reconcile_if_required()
+                    feed = self._feed_factory()
+                    self._active_feed = feed
+                    self._generation += 1
+                    self._generation_failed = False
+                    await self._subscribe(feed, loop)
                     await asyncio.to_thread(feed.consume)
-                    await self._drain_callbacks()
-                except Exception:
-                    await self._drain_callbacks()
-                    await self._mark_blocked()
-                    self._unsubscribe_active()
+                    await asyncio.sleep(0)
+                    await self._queue.join()
                     if self._stopped:
                         return
-                    delay = _RECONNECT_DELAYS[
-                        min(reconnect_attempt, len(_RECONNECT_DELAYS) - 1)
-                    ]
-                    reconnect_attempt += 1
-                    await self._sleep_with_jitter(delay)
-                    continue
-                return
+                    await self._mark_blocked()
+                except Exception:
+                    await self._mark_blocked()
+                finally:
+                    self._unsubscribe_active()
+                if self._stopped:
+                    return
+                delay = _RECONNECT_DELAYS[
+                    min(self._reconnect_attempt, len(_RECONNECT_DELAYS) - 1)
+                ]
+                self._reconnect_attempt += 1
+                await self._sleep_with_jitter(delay)
         finally:
             monitor.cancel()
+            consumer.cancel()
             with suppress(asyncio.CancelledError):
                 await monitor
+            with suppress(asyncio.CancelledError):
+                await consumer
 
     async def stop(self) -> None:
         """Idempotently remove subscriptions and publish inactive worker intent."""
@@ -199,31 +230,35 @@ class GrowwFeedWorker:
 
     async def mark_stale_if_silent(self) -> bool:
         """Persist one stale transition after valid callback silence exceeds the limit."""
-        if self._last_valid_update_at is None or self._stale:
-            return False
-        now = self._aware_now()
-        silence_seconds = int((now - self._last_valid_update_at).total_seconds())
-        if silence_seconds <= self._stale_after_seconds:
-            return False
-        self._stale = True
-        await self._redis_state.set_heartbeat(
-            _FEED_SERVICE,
-            HeartbeatState(
+        async with self._transition_lock:
+            baseline = self._last_valid_update_at or self._subscription_established_at
+            if baseline is None or self._stale:
+                return False
+            now = self._aware_now()
+            silence_seconds = int((now - baseline).total_seconds())
+            if silence_seconds <= self._stale_after_seconds:
+                return False
+            self._stale = True
+            await self._redis_state.set_heartbeat(
+                _FEED_SERVICE,
+                HeartbeatState(
+                    service=_FEED_SERVICE,
+                    observed_at=now,
+                    payload={"state": "stale", "silence_seconds": silence_seconds},
+                ),
+            )
+            await self._repository.save_health_transition(
                 service=_FEED_SERVICE,
+                state="stale",
+                source="worker",
+                idempotency_key=f"health:{_FEED_SERVICE}:stale:{int(now.timestamp() * 1000)}",
                 observed_at=now,
-                payload={"state": "stale", "silence_seconds": silence_seconds},
-            ),
-        )
-        await self._repository.save_health_transition(
-            service=_FEED_SERVICE,
-            state="stale",
-            source="worker",
-            idempotency_key=f"health:{_FEED_SERVICE}:stale:{int(now.timestamp() * 1000)}",
-            observed_at=now,
-            raw_payload={"silence_seconds": silence_seconds},
-        )
-        await self._readiness.dependency_blocked(_FEED_SERVICE)
-        return True
+                raw_payload={"silence_seconds": silence_seconds},
+            )
+            self._needs_reconciliation = True
+            self._generation_failed = True
+            await self._readiness.dependency_blocked(_FEED_SERVICE)
+            return True
 
     async def _subscribe(
         self, feed: GrowwFeed, loop: asyncio.AbstractEventLoop
@@ -237,6 +272,7 @@ class GrowwFeedWorker:
             index_wire,
             lambda: self._schedule_response(loop, feed.get_index_value, (self._index,), "value"),
         )
+        self._index_subscribed = True
         if derivative_wire:
             feed.subscribe_ltp(
                 derivative_wire,
@@ -244,7 +280,7 @@ class GrowwFeedWorker:
                     loop, feed.get_ltp, self._derivatives, "ltp"
                 ),
             )
-        self._subscribed = True
+            self._derivatives_subscribed = True
         await self._redis_state.set_subscription_state(
             _SUBSCRIPTION_KEY,
             SubscriptionState(
@@ -256,6 +292,9 @@ class GrowwFeedWorker:
                 },
             ),
         )
+        self._last_valid_update_at = None
+        self._subscription_established_at = self._aware_now()
+        self._stale = False
 
     def _schedule_response(
         self,
@@ -267,23 +306,49 @@ class GrowwFeedWorker:
         try:
             response = getter()
         except Exception:
+            loop.call_soon_threadsafe(self._signal_callback_failure)
             return
-        future = asyncio.run_coroutine_threadsafe(
-            self._handle_response(response, instruments, price_field), loop
+        message = _FeedMessage(response, instruments, price_field, self._generation)
+        loop.call_soon_threadsafe(
+            self._enqueue_message,
+            message,
         )
-        with self._callback_lock:
-            self._callback_futures.append(future)
 
-    async def _drain_callbacks(self) -> None:
+    def _enqueue_message(self, message: _FeedMessage) -> None:
+        if self._queue.full():
+            self._signal_callback_failure()
+            return
+        self._queue.put_nowait(message)
+
+    def _signal_callback_failure(self) -> None:
+        if self._generation_failed:
+            return
+        self._generation_failed = True
+        asyncio.create_task(self._mark_blocked())
+
+    async def _consume_messages(self) -> None:
         while True:
-            with self._callback_lock:
-                pending = self._callback_futures
-                self._callback_futures = []
-            if not pending:
-                return
-            await asyncio.gather(*(asyncio.wrap_future(future) for future in pending))
+            message = await self._queue.get()
+            try:
+                if message.generation == self._generation and not self._generation_failed:
+                    await self._handle_response(
+                        message.response, message.instruments, message.price_field
+                    )
+            except Exception:
+                await self._mark_blocked()
+            finally:
+                self._queue.task_done()
 
     async def _handle_response(
+        self,
+        response: dict[str, Any],
+        instruments: tuple[Instrument, ...],
+        price_field: str,
+    ) -> None:
+        async with self._transition_lock:
+            await self._handle_response_serialized(response, instruments, price_field)
+
+    async def _handle_response_serialized(
         self,
         response: dict[str, Any],
         instruments: tuple[Instrument, ...],
@@ -297,6 +362,8 @@ class GrowwFeedWorker:
             if normalized is None:
                 continue
             observed_at, price = normalized
+            latest = self._latest_event_at.get(instrument.instrument_token)
+            is_late = latest is not None and observed_at < latest
             raw_payload = {
                 "raw": point,
                 "normalized": {
@@ -314,7 +381,11 @@ class GrowwFeedWorker:
                 ),
                 observed_at=observed_at,
                 raw_payload=raw_payload,
+                is_late=is_late,
             )
+            if is_late or not inserted:
+                continue
+            self._latest_event_at[instrument.instrument_token] = observed_at
             await self._redis_state.set_quote(
                 instrument.instrument_token,
                 QuoteState(
@@ -337,45 +408,67 @@ class GrowwFeedWorker:
                     },
                 ),
             )
-            if inserted:
-                try:
-                    self._candle_builder.accept(
-                        CandleObservation(
-                            instrument_token=instrument.instrument_token,
-                            observed_at=observed_at,
-                            price=price,
-                        )
+            try:
+                self._candle_builder.accept(
+                    CandleObservation(
+                        instrument_token=instrument.instrument_token,
+                        observed_at=observed_at,
+                        price=price,
                     )
-                except ValueError:
-                    # The observation remains durable; candle rules reject closed sessions.
-                    pass
+                )
+            except ValueError:
+                # The observation remains durable; candle rules reject closed sessions.
+                pass
+            self._reconnect_attempt = 0
             await self._readiness.first_live_update()
 
     async def _mark_blocked(self) -> None:
-        now = self._aware_now()
-        await self._redis_state.set_heartbeat(
-            _FEED_SERVICE,
-            HeartbeatState(
-                service=_FEED_SERVICE,
-                observed_at=now,
-                payload={"state": "blocked"},
-            ),
-        )
-        await self._readiness.dependency_blocked(_FEED_SERVICE)
+        async with self._transition_lock:
+            now = self._aware_now()
+            self._needs_reconciliation = True
+            self._generation_failed = True
+            await self._redis_state.set_heartbeat(
+                _FEED_SERVICE,
+                HeartbeatState(
+                    service=_FEED_SERVICE,
+                    observed_at=now,
+                    payload={"state": "blocked"},
+                ),
+            )
+            await self._readiness.dependency_blocked(_FEED_SERVICE)
 
     def _unsubscribe_active(self) -> None:
-        if not self._subscribed or self._active_feed is None:
+        if self._active_feed is None:
             return
-        self._active_feed.unsubscribe_index_value(
-            [self._wire_instrument(self._index, segment="CASH")]
-        )
+        if self._index_subscribed:
+            try:
+                self._active_feed.unsubscribe_index_value(
+                    [self._wire_instrument(self._index, segment="CASH")]
+                )
+            except Exception:
+                pass
+            self._index_subscribed = False
         derivative_wire = [
             self._wire_instrument(instrument, segment="FNO")
             for instrument in self._derivatives
         ]
-        if derivative_wire:
-            self._active_feed.unsubscribe_ltp(derivative_wire)
-        self._subscribed = False
+        if derivative_wire and self._derivatives_subscribed:
+            try:
+                self._active_feed.unsubscribe_ltp(derivative_wire)
+            except Exception:
+                pass
+            self._derivatives_subscribed = False
+        self._active_feed = None
+
+    async def _reconcile_if_required(self) -> None:
+        if not self._needs_reconciliation:
+            return
+        if self._reconcile is None:
+            raise RuntimeError("reconciliation is required before feed recovery")
+        await self._reconcile()
+        await self._readiness.dependencies_ready()
+        await self._readiness.reconciled()
+        self._needs_reconciliation = False
 
     async def _sleep_with_jitter(self, delay: float) -> None:
         jitter = self._jitter(delay)
@@ -386,6 +479,8 @@ class GrowwFeedWorker:
         result = self._sleeper(delay + bounded)
         if inspect.isawaitable(result):
             await result
+        else:
+            await asyncio.sleep(0)
 
     async def _monitor_staleness(self) -> None:
         interval = max(1.0, self._stale_after_seconds / 2)
@@ -448,7 +543,8 @@ class GrowwFeedWorker:
 
     @staticmethod
     def _observation_key(token: str, observed_at: datetime, price: Decimal) -> str:
-        material = f"{token}\0{observed_at.isoformat()}\0{price}"
+        del price
+        material = f"{token}\0{observed_at.isoformat()}"
         return f"feed:{sha256(material.encode()).hexdigest()}"
 
 

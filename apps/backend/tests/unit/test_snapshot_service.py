@@ -97,11 +97,19 @@ FILL = Fill(
     filled_at=AT,
     source=MarketDataSource.GROWW_LIVE,
 )
+GREEK = OptionGreeks(
+    instrument=CALL,
+    observed_at=AT,
+    source=MarketDataSource.GROWW_LIVE,
+    delta=Decimal("0.51"),
+    gamma=Decimal("0.0012"),
+)
 
 
 class CompleteBroker:
-    def __init__(self, *, position_failures: int = 0) -> None:
+    def __init__(self, *, position_failures: int = 0, greeks_failures: int = 0) -> None:
         self.position_failures = position_failures
+        self.greeks_failures = greeks_failures
         self.calls: list[str] = []
 
     def instruments(self) -> tuple[Instrument, ...]:
@@ -117,8 +125,15 @@ class CompleteBroker:
         return CHAIN
 
     def greeks(self, contracts: tuple[OptionContract, ...]) -> tuple[OptionGreeks, ...]:
-        self.calls.append("greeks")
-        return ()
+        self.calls.append(f"greeks:{contracts[0].instrument_token}")
+        if self.greeks_failures:
+            self.greeks_failures -= 1
+            raise BrokerUnavailable(
+                code="GROWW_UNAVAILABLE",
+                correlation_id="safe-greeks-correlation",
+                summary="Groww is unavailable",
+            )
+        return (GREEK,)
 
     def margin(self) -> MarginSummary:
         self.calls.append("margin")
@@ -159,6 +174,7 @@ async def test_refresh_reconciles_account_before_initial_market_snapshots() -> N
         "fills:order-1",
         "nifty_quote",
         "option_chain:2026-08-06",
+        "greeks:NIFTY-25000-CE",
     ]
     assert snapshot.instruments == (INDEX, FUTURE, CALL)
     assert snapshot.market == QUOTE
@@ -167,12 +183,30 @@ async def test_refresh_reconciles_account_before_initial_market_snapshots() -> N
     assert snapshot.positions == (POSITION,)
     assert snapshot.orders == (ORDER,)
     assert snapshot.fills == (FILL,)
+    assert snapshot.greeks == (GREEK,)
     assert snapshot.refreshed_at == AT
 
 
 @pytest.mark.asyncio
 async def test_failed_position_read_never_becomes_an_empty_position_assumption() -> None:
     broker = CompleteBroker(position_failures=1)
+    service = SnapshotService(
+        broker,
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        max_attempts=1,
+    )
+
+    with pytest.raises(BrokerUnavailable, match="Groww is unavailable"):
+        await service.refresh()
+
+    assert service.last_snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_failed_greeks_read_aborts_the_complete_snapshot() -> None:
+    broker = CompleteBroker(greeks_failures=1)
     service = SnapshotService(
         broker,
         sleeper=lambda _: None,
@@ -328,6 +362,7 @@ async def test_worker_startup_preserves_dependency_reconciliation_and_feed_order
         "fills:order-1",
         "nifty_quote",
         "option_chain:2026-08-06",
+        "greeks:NIFTY-25000-CE",
         "reconciled",
         "subscriptions",
         "first_live_update",

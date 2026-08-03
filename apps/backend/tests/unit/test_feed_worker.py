@@ -61,11 +61,14 @@ class MemoryRedisState:
 
 
 class MemoryRepository:
-    def __init__(self) -> None:
+    def __init__(self, *, observation_error: Exception | None = None) -> None:
         self.observations: dict[str, dict[str, Any]] = {}
         self.health: dict[str, dict[str, Any]] = {}
+        self.observation_error = observation_error
 
     async def save_observation(self, **values: Any) -> bool:
+        if self.observation_error is not None:
+            raise self.observation_error
         key = str(values["idempotency_key"])
         if key in self.observations:
             return False
@@ -79,6 +82,20 @@ class MemoryRepository:
         self.health[key] = values
         return True
 
+
+class DelayedFirstRepository(MemoryRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.first = True
+
+    async def save_observation(self, **values: Any) -> bool:
+        if self.first:
+            self.first = False
+            self.started.set()
+            await self.release.wait()
+        return await super().save_observation(**values)
 
 class RecordingCandleBuilder:
     def __init__(self) -> None:
@@ -158,6 +175,28 @@ class BlockingFeed(FakeFeed):
             raise TimeoutError("test feed was not released")
 
 
+class SequenceIndexFeed(FakeFeed):
+    def __init__(self, payloads: list[dict[str, Any]], *, release: Event | None = None) -> None:
+        super().__init__(index_callback_count=len(payloads))
+        self.payloads = payloads
+        self.release = release
+
+    def get_index_value(self) -> dict[str, Any]:
+        return self.payloads.pop(0)
+
+    def consume(self) -> None:
+        super().consume()
+        if self.release is not None and not self.release.wait(timeout=2):
+            raise TimeoutError("test feed was not released")
+
+
+class PartialSubscriptionFeed(FakeFeed):
+    def subscribe_ltp(
+        self, instruments: list[dict[str, str]], on_data_received: Callable[[], None]
+    ) -> object:
+        raise RuntimeError("derivative subscription failed")
+
+
 def index_payload() -> dict[str, Any]:
     return {
         "NSE": {
@@ -176,6 +215,25 @@ def ltp_payload() -> dict[str, Any]:
             }
         }
     }
+
+
+async def yield_until(predicate: Callable[[], bool]) -> None:
+    for _ in range(2000):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition was not reached")
+
+
+async def successful_reconciliation() -> object:
+    return object()
+
+
+async def run_until_then_stop(worker: GrowwFeedWorker, predicate: Callable[[], bool]) -> None:
+    task = asyncio.create_task(worker.run())
+    await yield_until(predicate)
+    await worker.stop()
+    await asyncio.wait_for(task, timeout=1)
 
 
 @pytest.mark.asyncio
@@ -199,9 +257,10 @@ async def test_callbacks_normalize_index_value_and_derivative_ltp_to_utc() -> No
         jitter=lambda _: 0,
         clock=lambda: AT,
         stale_after_seconds=10,
+        reconcile=successful_reconciliation,
     )
 
-    await worker.run()
+    await run_until_then_stop(worker, lambda: len(repository.observations) == 2)
 
     assert feed.index_subscriptions == [
         [{"exchange": "NSE", "segment": "CASH", "exchange_token": "NIFTY50"}]
@@ -275,7 +334,7 @@ async def test_duplicate_callback_remains_one_logical_durable_and_candle_event()
         stale_after_seconds=10,
     )
 
-    await worker.run()
+    await run_until_then_stop(worker, lambda: len(repository.observations) == 1)
 
     assert len(repository.observations) == 1
     assert candles.observations == [
@@ -313,7 +372,7 @@ async def test_callback_silence_marks_shared_state_stale_and_resets_readiness() 
         clock=lambda: now[0],
         stale_after_seconds=10,
     )
-    await worker.run()
+    await run_until_then_stop(worker, lambda: readiness.is_ready)
     assert readiness.is_ready is True
 
     now[0] = AT + timedelta(seconds=11)
@@ -364,6 +423,7 @@ async def test_run_monitors_callback_silence_while_blocking_consume_is_active() 
         if heartbeat is not None and heartbeat.payload.get("state") == "stale":
             break
         await asyncio.sleep(0)
+    await worker.stop()
     release.set()
     await asyncio.wait_for(run_task, timeout=1)
 
@@ -381,6 +441,13 @@ async def test_reconnect_uses_bounded_exponential_delays() -> None:
         FakeFeed(index_payload={}),
     ]
     sleeps: list[float] = []
+    worker: GrowwFeedWorker
+
+    async def stop_after_third_disconnect(delay: float) -> None:
+        sleeps.append(delay)
+        if not feeds:
+            await worker.stop()
+
     worker = GrowwFeedWorker(
         feed_factory=lambda: feeds.pop(0),
         index=INDEX,
@@ -389,15 +456,16 @@ async def test_reconnect_uses_bounded_exponential_delays() -> None:
         redis_state=MemoryRedisState(),
         candle_builder=RecordingCandleBuilder(),
         readiness=ReadinessCoordinator(MemoryRedisState(), clock=lambda: AT),
-        sleeper=lambda delay: sleeps.append(delay),
+        sleeper=stop_after_third_disconnect,
         jitter=lambda _: 0,
         clock=lambda: AT,
         stale_after_seconds=10,
+        reconcile=successful_reconciliation,
     )
 
     await worker.run()
 
-    assert sleeps == [1, 2]
+    assert sleeps == [1, 2, 4]
 
 
 @pytest.mark.asyncio
@@ -417,9 +485,10 @@ async def test_stop_unsubscribes_once_and_persists_inactive_intent() -> None:
         clock=lambda: AT,
         stale_after_seconds=10,
     )
-    await worker.run()
-
+    task = asyncio.create_task(worker.run())
+    await yield_until(lambda: "market-feed" in redis_state.subscriptions)
     await worker.stop()
+    await asyncio.wait_for(task, timeout=1)
     await worker.stop()
 
     assert feed.index_unsubscriptions == [
@@ -432,4 +501,327 @@ async def test_stop_unsubscribes_once_and_persists_inactive_intent() -> None:
         subscription_key="market-feed",
         observed_at=AT,
         payload={"state": "inactive", "instrument_tokens": ["NIFTY50", "NIFTY-FUT"]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_zero_tick_subscription_becomes_stale_from_established_baseline() -> None:
+    now = [AT]
+    feed = FakeFeed(index_payload={})
+    repository = MemoryRepository()
+    redis_state = MemoryRedisState()
+    readiness = ReadinessCoordinator(redis_state, clock=lambda: now[0])
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: feed,
+        index=INDEX,
+        derivatives=(),
+        repository=repository,
+        redis_state=redis_state,
+        candle_builder=RecordingCandleBuilder(),
+        readiness=readiness,
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: now[0],
+        stale_after_seconds=10,
+    )
+    await run_until_then_stop(
+        worker, lambda: "market-feed" in redis_state.subscriptions
+    )
+    now[0] = AT + timedelta(seconds=11)
+
+    assert await worker.mark_stale_if_silent() is True
+    assert redis_state.heartbeats["groww-feed"].payload["state"] == "stale"
+
+
+@pytest.mark.asyncio
+async def test_equivalent_price_encodings_are_one_logical_observation() -> None:
+    first = index_payload()
+    first["NSE"]["CASH"]["NIFTY50"]["value"] = "25001.50"
+    second = index_payload()
+    second["NSE"]["CASH"]["NIFTY50"]["value"] = 25001.5
+    repository = MemoryRepository()
+    worker_feed = SequenceIndexFeed([first, second])
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: worker_feed,
+        index=INDEX,
+        derivatives=(),
+        repository=repository,
+        redis_state=MemoryRedisState(),
+        candle_builder=RecordingCandleBuilder(),
+        readiness=ReadinessCoordinator(MemoryRedisState(), clock=lambda: AT),
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+    )
+
+    await run_until_then_stop(
+        worker, lambda: not worker_feed.payloads and len(repository.observations) == 1
+    )
+
+    assert len(repository.observations) == 1
+
+
+@pytest.mark.asyncio
+async def test_unexpected_consume_eof_blocks_cleans_up_and_reconnects() -> None:
+    feeds = [FakeFeed(index_payload={}), FakeFeed(index_payload={})]
+    sleeps: list[float] = []
+    worker: GrowwFeedWorker
+
+    async def stop_after_first_retry(delay: float) -> None:
+        sleeps.append(delay)
+        await worker.stop()
+
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: feeds.pop(0),
+        index=INDEX,
+        derivatives=(),
+        repository=MemoryRepository(),
+        redis_state=(redis_state := MemoryRedisState()),
+        candle_builder=RecordingCandleBuilder(),
+        readiness=ReadinessCoordinator(redis_state, clock=lambda: AT),
+        sleeper=stop_after_first_retry,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+    )
+
+    await worker.run()
+
+    assert sleeps == [1]
+    assert redis_state.heartbeats["groww-feed"].payload["state"] == "blocked"
+    assert len(feeds) == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_subscription_failure_cleans_index_before_retry() -> None:
+    first = PartialSubscriptionFeed()
+    worker: GrowwFeedWorker
+    sleeps: list[float] = []
+
+    async def stop_retry(delay: float) -> None:
+        sleeps.append(delay)
+        await worker.stop()
+
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: first,
+        index=INDEX,
+        derivatives=(FUTURE,),
+        repository=MemoryRepository(),
+        redis_state=MemoryRedisState(),
+        candle_builder=RecordingCandleBuilder(),
+        readiness=ReadinessCoordinator(MemoryRedisState(), clock=lambda: AT),
+        sleeper=stop_retry,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+    )
+
+    await worker.run()
+
+    assert sleeps == [1]
+    assert len(first.index_unsubscriptions) == 1
+
+
+@pytest.mark.asyncio
+async def test_callback_persistence_error_blocks_before_consume_returns() -> None:
+    release = Event()
+    redis_state = MemoryRedisState()
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: BlockingFeed(release),
+        index=INDEX,
+        derivatives=(),
+        repository=MemoryRepository(observation_error=RuntimeError("database failed")),
+        redis_state=redis_state,
+        candle_builder=RecordingCandleBuilder(),
+        readiness=ReadinessCoordinator(redis_state, clock=lambda: AT),
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+    )
+
+    task = asyncio.create_task(worker.run())
+    await yield_until(
+        lambda: redis_state.heartbeats.get("groww-feed") is not None
+        and redis_state.heartbeats["groww-feed"].payload.get("state") == "blocked"
+    )
+    await worker.stop()
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert redis_state.heartbeats["groww-feed"].payload["state"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_reconciles_before_reconnect_tick_restores_shared_ready() -> None:
+    release = Event()
+    feeds = [
+        FakeFeed(consume_error=RuntimeError("feed disconnected")),
+        BlockingFeed(release),
+    ]
+    redis_state = MemoryRedisState()
+    readiness = ReadinessCoordinator(redis_state, clock=lambda: AT)
+    await readiness.dependencies_ready()
+    await readiness.reconciled()
+    await readiness.first_live_update()
+    reconciliations = 0
+
+    async def reconcile() -> object:
+        nonlocal reconciliations
+        reconciliations += 1
+        return object()
+
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: feeds.pop(0),
+        index=INDEX,
+        derivatives=(),
+        repository=MemoryRepository(),
+        redis_state=redis_state,
+        candle_builder=RecordingCandleBuilder(),
+        readiness=readiness,
+        reconcile=reconcile,
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+    )
+
+    task = asyncio.create_task(worker.run())
+    await yield_until(lambda: reconciliations == 1 and readiness.is_ready)
+    shared = await redis_state.get_heartbeat("readiness")
+    await worker.stop()
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert shared is not None
+    assert shared.payload["ready"] is True
+    assert reconciliations == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_reconciliation_never_restores_or_resubscribes() -> None:
+    feed_calls = 0
+    attempts = 0
+    worker: GrowwFeedWorker
+    redis_state = MemoryRedisState()
+    readiness = ReadinessCoordinator(redis_state, clock=lambda: AT)
+    await readiness.dependencies_ready()
+    await readiness.reconciled()
+    await readiness.first_live_update()
+
+    def feed_factory() -> FakeFeed:
+        nonlocal feed_calls
+        feed_calls += 1
+        return FakeFeed(consume_error=RuntimeError("feed disconnected"))
+
+    async def reconcile() -> object:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("account remains unavailable")
+
+    async def stop_after_failure(_: float) -> None:
+        if attempts:
+            await worker.stop()
+
+    worker = GrowwFeedWorker(
+        feed_factory=feed_factory,
+        index=INDEX,
+        derivatives=(),
+        repository=MemoryRepository(),
+        redis_state=redis_state,
+        candle_builder=RecordingCandleBuilder(),
+        readiness=readiness,
+        reconcile=reconcile,
+        sleeper=stop_after_failure,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+    )
+
+    await worker.run()
+
+    assert readiness.is_ready is False
+    assert attempts == 1
+    assert feed_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_serial_consumer_completes_high_callback_count_without_losing_events() -> None:
+    payloads: list[dict[str, Any]] = []
+    for sequence in range(200):
+        payload = index_payload()
+        payload["NSE"]["CASH"]["NIFTY50"] = {
+            "tsInMillis": 1785748500000 + sequence,
+            "value": 25000 + sequence,
+        }
+        payloads.append(payload)
+    feed = SequenceIndexFeed(payloads)
+    repository = MemoryRepository()
+    redis_state = MemoryRedisState()
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: feed,
+        index=INDEX,
+        derivatives=(),
+        repository=repository,
+        redis_state=redis_state,
+        candle_builder=RecordingCandleBuilder(),
+        readiness=ReadinessCoordinator(redis_state, clock=lambda: AT),
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+        queue_capacity=256,
+    )
+
+    await run_until_then_stop(worker, lambda: len(repository.observations) == 200)
+
+    assert len(repository.observations) == 200
+    assert redis_state.quotes["NIFTY50"].observed_at == datetime(
+        2026, 8, 3, 9, 15, 0, 199000, tzinfo=UTC
+    )
+
+
+@pytest.mark.asyncio
+async def test_older_event_cannot_overwrite_newer_quote_after_slow_persistence() -> None:
+    newer = index_payload()
+    newer["NSE"]["CASH"]["NIFTY50"] = {
+        "tsInMillis": 1785748501000,
+        "value": 25002,
+    }
+    older = index_payload()
+    older["NSE"]["CASH"]["NIFTY50"] = {
+        "tsInMillis": 1785748500000,
+        "value": 25001,
+    }
+    consume_release = Event()
+    feed = SequenceIndexFeed([newer, older], release=consume_release)
+    repository = DelayedFirstRepository()
+    redis_state = MemoryRedisState()
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: feed,
+        index=INDEX,
+        derivatives=(),
+        repository=repository,
+        redis_state=redis_state,
+        candle_builder=RecordingCandleBuilder(),
+        readiness=ReadinessCoordinator(redis_state, clock=lambda: AT),
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+    )
+
+    task = asyncio.create_task(worker.run())
+    await repository.started.wait()
+    repository.release.set()
+    await yield_until(lambda: len(repository.observations) == 2)
+    await worker.stop()
+    consume_release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert redis_state.quotes["NIFTY50"] == QuoteState(
+        instrument_key="NIFTY50",
+        observed_at=datetime(2026, 8, 3, 9, 15, 1, tzinfo=UTC),
+        payload={"last_price": "25002", "source": "groww_live"},
     )
