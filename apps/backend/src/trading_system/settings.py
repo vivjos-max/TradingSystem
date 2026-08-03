@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from urllib.parse import quote_plus
 
-from pydantic import BaseModel, SecretStr, field_validator
+from pydantic import BaseModel, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,45 @@ class SafeSettingsView(BaseModel):
     dependency_timeout_seconds: int
     option_strikes_each_side: int
     groww_credentials_configured: bool
+
+
+class SafeSettingsValidationIssue(BaseModel):
+    """A field/type diagnostic with no source value attached."""
+
+    field: str
+    error_type: str
+
+
+class SafeSettingsValidationView(BaseModel):
+    """A settings loading failure that is safe to log or return from an API."""
+
+    code: str = "SETTINGS_VALIDATION_FAILED"
+    issues: tuple[SafeSettingsValidationIssue, ...]
+
+
+class SettingsValidationError(RuntimeError):
+    """Safe settings-loading failure that deliberately drops raw input values."""
+
+    def __init__(self, issues: tuple[SafeSettingsValidationIssue, ...]) -> None:
+        self._safe_view = SafeSettingsValidationView(issues=issues)
+        details = "; ".join(f"{issue.field} ({issue.error_type})" for issue in issues)
+        super().__init__(f"Settings validation failed: {details}")
+
+    @classmethod
+    def from_validation_error(cls, error: ValidationError) -> SettingsValidationError:
+        """Retain only stable field/type diagnostics from Pydantic's error details."""
+        issues = tuple(
+            SafeSettingsValidationIssue(
+                field=".".join(str(part) for part in detail["loc"]),
+                error_type=str(detail["type"]),
+            )
+            for detail in error.errors()
+        )
+        return cls(issues)
+
+    def safe_view(self) -> SafeSettingsValidationView:
+        """Return the API-facing representation without Pydantic's raw input field."""
+        return self._safe_view
 
 
 class Settings(BaseSettings):
@@ -109,4 +148,7 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Load settings once per server process from the ignored .env file."""
-    return Settings()
+    try:
+        return Settings()
+    except ValidationError as error:
+        raise SettingsValidationError.from_validation_error(error) from None

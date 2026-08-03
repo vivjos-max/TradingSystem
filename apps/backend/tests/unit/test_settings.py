@@ -1,4 +1,6 @@
-from trading_system.settings import Settings
+import pytest
+
+from trading_system.settings import Settings, SettingsValidationError, get_settings
 
 
 def test_safe_view_never_contains_groww_secrets(monkeypatch):
@@ -20,3 +22,32 @@ def test_safe_view_never_contains_groww_secrets(monkeypatch):
     assert "test-postgres-password-sensitive" not in repr(settings)
     assert "test-redis-password-sensitive" not in repr(settings)
     assert settings.safe_view().groww_credentials_configured is True
+
+
+def test_get_settings_redacts_sensitive_validation_input(monkeypatch):
+    """Settings failures expose diagnostics without serializing raw environment values."""
+    sentinel = "validation-input-sensitive"
+    monkeypatch.setenv("GROWW_TOTP_TOKEN", "validation-token-sensitive")
+    monkeypatch.setenv("GROWW_TOTP_SECRET", "validation-secret-sensitive")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "validation-postgres-sensitive")
+    monkeypatch.setenv("REDIS_PASSWORD", "validation-redis-sensitive")
+    monkeypatch.setenv("POSTGRES_PORT", sentinel)
+    get_settings.cache_clear()
+
+    with pytest.raises(SettingsValidationError) as caught:
+        get_settings()
+
+    error = caught.value
+    rendered = str(error)
+    serialized = error.safe_view().model_dump_json()
+    for secret in (
+        sentinel,
+        "validation-token-sensitive",
+        "validation-secret-sensitive",
+        "validation-postgres-sensitive",
+        "validation-redis-sensitive",
+    ):
+        assert secret not in rendered
+        assert secret not in serialized
+    assert "postgres_port" in rendered
+    assert "int_parsing" in serialized

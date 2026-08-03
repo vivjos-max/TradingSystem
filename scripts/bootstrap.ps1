@@ -1,9 +1,18 @@
 [CmdletBinding()]
 param(
-    [string]$PythonExecutable = 'C:\Users\Home\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+    # Override with -PythonExecutable when the bundled runtime is elsewhere.
+    [string]$PythonExecutable
 )
 
 $ErrorActionPreference = 'Stop'
+$runtimePath = '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+if (-not $PythonExecutable) {
+    if (-not $env:USERPROFILE) {
+        throw 'USERPROFILE is unavailable; provide -PythonExecutable explicitly.'
+    }
+    $PythonExecutable = Join-Path $env:USERPROFILE $runtimePath
+}
+
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $venvPath = Join-Path $repositoryRoot '.venv'
 $venvPython = Join-Path $venvPath 'Scripts\python.exe'
