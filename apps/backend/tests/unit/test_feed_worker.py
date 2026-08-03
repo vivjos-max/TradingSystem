@@ -97,6 +97,18 @@ class DelayedFirstRepository(MemoryRepository):
             await self.release.wait()
         return await super().save_observation(**values)
 
+
+class PausedHealthRepository(MemoryRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.health_started = asyncio.Event()
+        self.health_release = asyncio.Event()
+
+    async def save_health_transition(self, **values: Any) -> bool:
+        self.health_started.set()
+        await self.health_release.wait()
+        return await super().save_health_transition(**values)
+
 class RecordingCandleBuilder:
     def __init__(self) -> None:
         self.observations: list[CandleObservation] = []
@@ -195,6 +207,37 @@ class PartialSubscriptionFeed(FakeFeed):
         self, instruments: list[dict[str, str]], on_data_received: Callable[[], None]
     ) -> object:
         raise RuntimeError("derivative subscription failed")
+
+
+class ControlledFeed(FakeFeed):
+    def __init__(self, release: Event) -> None:
+        super().__init__(index_payload=index_payload())
+        self.release = release
+        self.consume_calls = 0
+
+    def consume(self) -> None:
+        self.consume_calls += 1
+        if not self.release.wait(timeout=2):
+            raise TimeoutError("controlled feed was not released")
+
+    def emit(self) -> None:
+        assert self.index_callback is not None
+        self.index_callback()
+
+
+class PausedActiveRedis(MemoryRedisState):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_started = asyncio.Event()
+        self.active_release = asyncio.Event()
+
+    async def set_subscription_state(
+        self, subscription_key: str, value: SubscriptionState
+    ) -> None:
+        if value.payload.get("state") == "active":
+            self.active_started.set()
+            await self.active_release.wait()
+        await super().set_subscription_state(subscription_key, value)
 
 
 def index_payload() -> dict[str, Any]:
@@ -353,7 +396,8 @@ async def test_duplicate_callback_remains_one_logical_durable_and_candle_event()
 @pytest.mark.asyncio
 async def test_callback_silence_marks_shared_state_stale_and_resets_readiness() -> None:
     now = [AT]
-    feed = FakeFeed(index_payload=index_payload())
+    release = Event()
+    feed = BlockingFeed(release)
     repository = MemoryRepository()
     redis_state = MemoryRedisState()
     readiness = ReadinessCoordinator(redis_state, clock=lambda: now[0])
@@ -372,11 +416,15 @@ async def test_callback_silence_marks_shared_state_stale_and_resets_readiness() 
         clock=lambda: now[0],
         stale_after_seconds=10,
     )
-    await run_until_then_stop(worker, lambda: readiness.is_ready)
+    task = asyncio.create_task(worker.run())
+    await yield_until(lambda: readiness.is_ready)
     assert readiness.is_ready is True
 
     now[0] = AT + timedelta(seconds=11)
     changed = await worker.mark_stale_if_silent()
+    await worker.stop()
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
 
     assert changed is True
     assert readiness.is_ready is False
@@ -507,7 +555,8 @@ async def test_stop_unsubscribes_once_and_persists_inactive_intent() -> None:
 @pytest.mark.asyncio
 async def test_zero_tick_subscription_becomes_stale_from_established_baseline() -> None:
     now = [AT]
-    feed = FakeFeed(index_payload={})
+    release = Event()
+    feed = ControlledFeed(release)
     repository = MemoryRepository()
     redis_state = MemoryRedisState()
     readiness = ReadinessCoordinator(redis_state, clock=lambda: now[0])
@@ -524,12 +573,14 @@ async def test_zero_tick_subscription_becomes_stale_from_established_baseline() 
         clock=lambda: now[0],
         stale_after_seconds=10,
     )
-    await run_until_then_stop(
-        worker, lambda: "market-feed" in redis_state.subscriptions
-    )
+    task = asyncio.create_task(worker.run())
+    await yield_until(lambda: "market-feed" in redis_state.subscriptions)
     now[0] = AT + timedelta(seconds=11)
 
     assert await worker.mark_stale_if_silent() is True
+    await worker.stop()
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
     assert redis_state.heartbeats["groww-feed"].payload["state"] == "stale"
 
 
@@ -825,3 +876,122 @@ async def test_older_event_cannot_overwrite_newer_quote_after_slow_persistence()
         observed_at=datetime(2026, 8, 3, 9, 15, 1, tzinfo=UTC),
         payload={"last_price": "25002", "source": "groww_live"},
     )
+
+
+@pytest.mark.asyncio
+async def test_stop_during_paused_reconciliation_never_resubscribes() -> None:
+    reconcile_started = asyncio.Event()
+    reconcile_release = asyncio.Event()
+    feed_calls = 0
+
+    def factory() -> FakeFeed:
+        nonlocal feed_calls
+        feed_calls += 1
+        return FakeFeed(consume_error=RuntimeError("disconnect"))
+
+    async def reconcile() -> object:
+        reconcile_started.set()
+        await reconcile_release.wait()
+        return object()
+
+    worker = GrowwFeedWorker(
+        feed_factory=factory,
+        index=INDEX,
+        derivatives=(),
+        repository=MemoryRepository(),
+        redis_state=(redis_state := MemoryRedisState()),
+        candle_builder=RecordingCandleBuilder(),
+        readiness=ReadinessCoordinator(redis_state, clock=lambda: AT),
+        reconcile=reconcile,
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+    )
+
+    task = asyncio.create_task(worker.run())
+    await reconcile_started.wait()
+    await worker.stop()
+    reconcile_release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert feed_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_during_active_state_persistence_cleans_without_consume() -> None:
+    redis_state = PausedActiveRedis()
+    feed = ControlledFeed(Event())
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: feed,
+        index=INDEX,
+        derivatives=(),
+        repository=MemoryRepository(),
+        redis_state=redis_state,
+        candle_builder=RecordingCandleBuilder(),
+        readiness=ReadinessCoordinator(redis_state, clock=lambda: AT),
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: AT,
+        stale_after_seconds=10,
+    )
+
+    task = asyncio.create_task(worker.run())
+    await redis_state.active_started.wait()
+    await worker.stop()
+    redis_state.active_release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert feed.consume_calls == 0
+    assert len(feed.index_unsubscriptions) == 1
+
+
+@pytest.mark.asyncio
+async def test_old_stale_transition_cannot_block_new_generation_tick() -> None:
+    now = [AT]
+    old_release = Event()
+    new_release = Event()
+    old_feed = BlockingFeed(old_release)
+    new_feed = ControlledFeed(new_release)
+    new_feed.index_payload["NSE"]["CASH"]["NIFTY50"]["tsInMillis"] = 1785748501123
+    feeds = [old_feed, new_feed]
+    repository = PausedHealthRepository()
+    redis_state = MemoryRedisState()
+    readiness = ReadinessCoordinator(redis_state, clock=lambda: now[0])
+    await readiness.dependencies_ready()
+    await readiness.reconciled()
+    worker = GrowwFeedWorker(
+        feed_factory=lambda: feeds.pop(0),
+        index=INDEX,
+        derivatives=(),
+        repository=repository,
+        redis_state=redis_state,
+        candle_builder=RecordingCandleBuilder(),
+        readiness=readiness,
+        reconcile=successful_reconciliation,
+        sleeper=lambda _: None,
+        jitter=lambda _: 0,
+        clock=lambda: now[0],
+        stale_after_seconds=10,
+    )
+
+    task = asyncio.create_task(worker.run())
+    await yield_until(lambda: readiness.is_ready)
+    now[0] = AT + timedelta(seconds=11)
+    stale_task = asyncio.create_task(worker.mark_stale_if_silent())
+    await repository.health_started.wait()
+    old_release.set()
+    await yield_until(lambda: new_feed.index_callback is not None)
+    repository.health_release.set()
+    await stale_task
+    new_feed.emit()
+    await yield_until(
+        lambda: readiness.is_ready
+        and redis_state.quotes["NIFTY50"].observed_at.second == 1
+    )
+    await worker.stop()
+    new_release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert readiness.is_ready is True
+    assert redis_state.heartbeats["groww-feed"].payload["state"] == "live"

@@ -158,11 +158,14 @@ class GrowwFeedWorker:
         self._index_subscribed = False
         self._derivatives_subscribed = False
         self._stopped = False
+        self._stop_event = asyncio.Event()
         self._last_valid_update_at: datetime | None = None
         self._subscription_established_at: datetime | None = None
         self._stale = False
         self._needs_reconciliation = False
         self._generation = 0
+        self._active_generation: int | None = None
+        self._baseline_generation: int | None = None
         self._generation_failed = False
         self._queue: asyncio.Queue[_FeedMessage] = asyncio.Queue(maxsize=queue_capacity)
         self._transition_lock = asyncio.Lock()
@@ -179,12 +182,20 @@ class GrowwFeedWorker:
             loop = asyncio.get_running_loop()
             while not self._stopped:
                 try:
-                    await self._reconcile_if_required()
+                    if not await self._reconcile_if_required():
+                        return
+                    if self._stop_event.is_set():
+                        return
                     feed = self._feed_factory()
+                    if self._stop_event.is_set():
+                        return
                     self._active_feed = feed
                     self._generation += 1
                     self._generation_failed = False
-                    await self._subscribe(feed, loop)
+                    if not await self._subscribe(feed, loop):
+                        return
+                    if self._stop_event.is_set():
+                        return
                     await asyncio.to_thread(feed.consume)
                     await asyncio.sleep(0)
                     await self._queue.join()
@@ -215,6 +226,7 @@ class GrowwFeedWorker:
         if self._stopped:
             return
         self._stopped = True
+        self._stop_event.set()
         self._unsubscribe_active()
         await self._redis_state.set_subscription_state(
             _SUBSCRIPTION_KEY,
@@ -231,38 +243,43 @@ class GrowwFeedWorker:
     async def mark_stale_if_silent(self) -> bool:
         """Persist one stale transition after valid callback silence exceeds the limit."""
         async with self._transition_lock:
+            generation = self._active_generation
             baseline = self._last_valid_update_at or self._subscription_established_at
-            if baseline is None or self._stale:
+            if generation is None or self._baseline_generation != generation or baseline is None or self._stale:
                 return False
             now = self._aware_now()
             silence_seconds = int((now - baseline).total_seconds())
             if silence_seconds <= self._stale_after_seconds:
                 return False
-            self._stale = True
-            await self._redis_state.set_heartbeat(
-                _FEED_SERVICE,
-                HeartbeatState(
-                    service=_FEED_SERVICE,
-                    observed_at=now,
-                    payload={"state": "stale", "silence_seconds": silence_seconds},
-                ),
-            )
-            await self._repository.save_health_transition(
+        await self._redis_state.set_heartbeat(
+            _FEED_SERVICE,
+            HeartbeatState(
                 service=_FEED_SERVICE,
-                state="stale",
-                source="worker",
-                idempotency_key=f"health:{_FEED_SERVICE}:stale:{int(now.timestamp() * 1000)}",
                 observed_at=now,
-                raw_payload={"silence_seconds": silence_seconds},
-            )
+                payload={"state": "stale", "silence_seconds": silence_seconds},
+            ),
+        )
+        await self._repository.save_health_transition(
+            service=_FEED_SERVICE,
+            state="stale",
+            source="worker",
+            idempotency_key=f"health:{_FEED_SERVICE}:stale:{int(now.timestamp() * 1000)}",
+            observed_at=now,
+            raw_payload={"silence_seconds": silence_seconds},
+        )
+        async with self._transition_lock:
+            if self._active_generation != generation or self._baseline_generation != generation:
+                return False
             self._needs_reconciliation = True
             self._generation_failed = True
-            await self._readiness.dependency_blocked(_FEED_SERVICE)
-            return True
+            self._stale = True
+            self._active_generation = None
+        await self._readiness.dependency_blocked(_FEED_SERVICE)
+        return True
 
     async def _subscribe(
         self, feed: GrowwFeed, loop: asyncio.AbstractEventLoop
-    ) -> None:
+    ) -> bool:
         index_wire = [self._wire_instrument(self._index, segment="CASH")]
         derivative_wire = [
             self._wire_instrument(instrument, segment="FNO")
@@ -273,6 +290,9 @@ class GrowwFeedWorker:
             lambda: self._schedule_response(loop, feed.get_index_value, (self._index,), "value"),
         )
         self._index_subscribed = True
+        if self._stop_event.is_set():
+            self._unsubscribe_active()
+            return False
         if derivative_wire:
             feed.subscribe_ltp(
                 derivative_wire,
@@ -281,6 +301,9 @@ class GrowwFeedWorker:
                 ),
             )
             self._derivatives_subscribed = True
+            if self._stop_event.is_set():
+                self._unsubscribe_active()
+                return False
         await self._redis_state.set_subscription_state(
             _SUBSCRIPTION_KEY,
             SubscriptionState(
@@ -292,9 +315,16 @@ class GrowwFeedWorker:
                 },
             ),
         )
-        self._last_valid_update_at = None
-        self._subscription_established_at = self._aware_now()
-        self._stale = False
+        if self._stop_event.is_set():
+            self._unsubscribe_active()
+            return False
+        async with self._transition_lock:
+            self._active_generation = self._generation
+            self._baseline_generation = self._generation
+            self._last_valid_update_at = None
+            self._subscription_established_at = self._aware_now()
+            self._stale = False
+        return True
 
     def _schedule_response(
         self,
@@ -332,7 +362,7 @@ class GrowwFeedWorker:
             try:
                 if message.generation == self._generation and not self._generation_failed:
                     await self._handle_response(
-                        message.response, message.instruments, message.price_field
+                        message.response, message.instruments, message.price_field, message.generation
                     )
             except Exception:
                 await self._mark_blocked()
@@ -344,8 +374,11 @@ class GrowwFeedWorker:
         response: dict[str, Any],
         instruments: tuple[Instrument, ...],
         price_field: str,
+        generation: int,
     ) -> None:
         async with self._transition_lock:
+            if self._active_generation != generation:
+                return
             await self._handle_response_serialized(response, instruments, price_field)
 
     async def _handle_response_serialized(
@@ -438,6 +471,10 @@ class GrowwFeedWorker:
             await self._readiness.dependency_blocked(_FEED_SERVICE)
 
     def _unsubscribe_active(self) -> None:
+        self._active_generation = None
+        self._baseline_generation = None
+        self._subscription_established_at = None
+        self._last_valid_update_at = None
         if self._active_feed is None:
             return
         if self._index_subscribed:
@@ -460,15 +497,22 @@ class GrowwFeedWorker:
             self._derivatives_subscribed = False
         self._active_feed = None
 
-    async def _reconcile_if_required(self) -> None:
+    async def _reconcile_if_required(self) -> bool:
         if not self._needs_reconciliation:
-            return
+            return not self._stop_event.is_set()
         if self._reconcile is None:
             raise RuntimeError("reconciliation is required before feed recovery")
         await self._reconcile()
+        if self._stop_event.is_set():
+            return False
         await self._readiness.dependencies_ready()
+        if self._stop_event.is_set():
+            return False
         await self._readiness.reconciled()
+        if self._stop_event.is_set():
+            return False
         self._needs_reconciliation = False
+        return True
 
     async def _sleep_with_jitter(self, delay: float) -> None:
         jitter = self._jitter(delay)
