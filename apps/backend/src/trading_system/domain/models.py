@@ -25,6 +25,16 @@ class ServiceHealthState(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class SystemState(StrEnum):
+    """Most severe read-only operating state currently observed."""
+
+    BLOCKED = "blocked"
+    STALE = "stale"
+    DEGRADED = "degraded"
+    MARKET_CLOSED = "market_closed"
+    LIVE = "live"
+
+
 class ImmutableModel(BaseModel):
     """Base model that rejects timestamps without an explicit timezone."""
 
@@ -146,7 +156,9 @@ class Candle(ImmutableModel):
     high: Decimal
     low: Decimal
     close: Decimal
-    volume: int
+    volume: int | None
+    session_date: date
+    finalized: bool = True
 
 
 class ServiceHealth(ImmutableModel):
@@ -159,6 +171,8 @@ class ServiceHealth(ImmutableModel):
 class SystemStatus(ImmutableModel):
     observed_at: datetime
     services: tuple[ServiceHealth, ...]
+    state: SystemState = SystemState.LIVE
+    last_observed_at: datetime | None = None
 
 
 class NiftyUniverse(ImmutableModel):
