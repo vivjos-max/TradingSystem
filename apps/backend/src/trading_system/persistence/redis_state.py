@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Literal, TypeVar
 
@@ -21,14 +22,36 @@ ACCOUNT_TTL_SECONDS = 300
 SUBSCRIPTION_TTL_SECONDS = 3600
 
 _FORBIDDEN_FIELDS = {
+    "api_key",
+    "apikey",
+    "api_token",
+    "apitoken",
+    "auth_token",
+    "authtoken",
     "access_token",
+    "accesstoken",
     "refresh_token",
+    "refreshtoken",
     "password",
+    "passwd",
     "secret",
     "client_secret",
+    "clientsecret",
+    "totp_token",
+    "totptoken",
+    "totp_secret",
+    "totpsecret",
     "credential",
     "credentials",
+    "creds",
     "sdk_client",
+    "sdkclient",
+    "authorization",
+    "bearer_token",
+    "bearertoken",
+    "session_token",
+    "sessiontoken",
+    "jwt",
     "execution_state",
     "order",
     "orders",
@@ -37,10 +60,15 @@ _FORBIDDEN_FIELDS = {
 }
 
 
+def _canonical_field_name(value: str) -> str:
+    with_word_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    return re.sub(r"[^a-z0-9]+", "_", with_word_boundaries.casefold()).strip("_")
+
+
 def _assert_safe(value: JsonValue) -> JsonValue:
     if isinstance(value, dict):
         for key, child in value.items():
-            if key.casefold() in _FORBIDDEN_FIELDS:
+            if _canonical_field_name(key) in _FORBIDDEN_FIELDS:
                 raise ValueError(f"forbidden live-state field: {key}")
             _assert_safe(child)
     elif isinstance(value, list):
@@ -52,7 +80,7 @@ def _assert_safe(value: JsonValue) -> JsonValue:
 class LiveState(BaseModel):
     """Common envelope guaranteeing an explicit codec version and UTC event time."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     schema_version: Literal[1] = 1
     observed_at: datetime
@@ -157,12 +185,7 @@ class RedisLiveState:
     async def rebuild_from_repository(self, repository: PostgresRepository) -> int:
         """Restore each identity's newest reconstructable state after cache loss."""
         rebuilt = 0
-        seen: set[tuple[str, str]] = set()
         for observation in await repository.latest_observations():
-            identity = ("quote", observation.instrument_key)
-            if identity in seen:
-                continue
-            seen.add(identity)
             await self.set_quote(
                 observation.instrument_key,
                 QuoteState(
@@ -173,10 +196,6 @@ class RedisLiveState:
             )
             rebuilt += 1
         for snapshot in await repository.latest_broker_snapshots("option_chain"):
-            identity = ("option_chain", snapshot.snapshot_key)
-            if identity in seen:
-                continue
-            seen.add(identity)
             await self.set_option_chain(
                 snapshot.snapshot_key,
                 OptionChainState(
@@ -187,10 +206,6 @@ class RedisLiveState:
             )
             rebuilt += 1
         for account in await repository.latest_account_snapshots():
-            identity = ("account", account.account_key)
-            if identity in seen:
-                continue
-            seen.add(identity)
             await self.set_account_summary(
                 account.account_key,
                 AccountSummaryState(
@@ -201,10 +216,6 @@ class RedisLiveState:
             )
             rebuilt += 1
         for transition in await repository.latest_health_transitions():
-            identity = ("heartbeat", transition.service)
-            if identity in seen:
-                continue
-            seen.add(identity)
             await self.set_heartbeat(
                 transition.service,
                 HeartbeatState(
@@ -216,10 +227,6 @@ class RedisLiveState:
             rebuilt += 1
         for candle in await repository.latest_candles(finalized=False):
             candle_key = f"{candle.instrument_key}:{candle.interval}"
-            identity = ("candle", candle_key)
-            if identity in seen:
-                continue
-            seen.add(identity)
             await self.set_in_progress_candle(
                 candle_key,
                 InProgressCandleState(

@@ -79,7 +79,7 @@ async def test_late_observation_is_retained_as_audit_event(
     repository: PostgresRepository,
 ) -> None:
     await repository.save_observation(
-        instrument_key="NSE:NIFTY50",
+        instrument_key="NSE:NIFTY50:LATE",
         source="groww_live",
         idempotency_key="quote:NSE:NIFTY50:late:16",
         observed_at=datetime(2026, 8, 3, 9, 14, 59, tzinfo=UTC),
@@ -170,3 +170,64 @@ async def test_repository_rejects_naive_timestamp_before_write(
             observed_at=datetime(2026, 8, 3, 9, 15),
             raw_payload={},
         )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_latest_reads_do_not_allow_one_busy_identity_to_starve_another(
+    repository: PostgresRepository,
+) -> None:
+    base = datetime(2026, 8, 3, 10, 0, tzinfo=UTC)
+    await repository.save_broker_snapshot(
+        snapshot_kind="option_chain",
+        snapshot_key="sparse-chain",
+        source="groww_live",
+        idempotency_key="sparse-chain:0",
+        observed_at=base,
+        raw_payload={"sequence": 0},
+    )
+    for sequence in range(101):
+        await repository.save_broker_snapshot(
+            snapshot_kind="option_chain",
+            snapshot_key="busy-chain",
+            source="groww_live",
+            idempotency_key=f"busy-chain:{sequence}",
+            observed_at=base + timedelta(seconds=sequence + 1),
+            raw_payload={"sequence": sequence},
+        )
+
+    latest = await repository.latest_broker_snapshots("option_chain")
+
+    assert {row.snapshot_key for row in latest} >= {"busy-chain", "sparse-chain"}
+    busy = next(row for row in latest if row.snapshot_key == "busy-chain")
+    assert busy.raw_payload == {"sequence": 100}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_maximum_caller_candle_key_remains_bounded_and_idempotent(
+    repository: PostgresRepository,
+) -> None:
+    at = datetime(2026, 8, 3, 10, 30, tzinfo=UTC)
+    candle = CandleInput(
+        instrument_key="NSE:NIFTY50",
+        interval="5m",
+        opened_at=at,
+        closed_at=at + timedelta(minutes=5),
+        open=Decimal("25000"),
+        high=Decimal("25005"),
+        low=Decimal("24995"),
+        close=Decimal("25001"),
+        volume=50,
+        finalized=True,
+        is_late=False,
+        raw_payload={"source": "boundary"},
+    )
+    maximum_caller_key = "x" * 256
+
+    assert await repository.save_candles(
+        source="groww_live", idempotency_key=maximum_caller_key, candles=[candle]
+    ) == 1
+    assert await repository.save_candles(
+        source="groww_live", idempotency_key=maximum_caller_key, candles=[candle]
+    ) == 0

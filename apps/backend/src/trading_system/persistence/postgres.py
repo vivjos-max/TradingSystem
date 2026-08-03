@@ -8,7 +8,7 @@ from decimal import Decimal
 from hashlib import sha256
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import Select, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,6 +32,22 @@ def _required(value: str, field: str) -> str:
     if not value.strip():
         raise ValueError(f"{field} must not be blank")
     return value
+
+
+def _candle_idempotency_key(
+    caller_key: str, source: str, candle: CandleInput
+) -> str:
+    """Hash caller intent and the full natural key into a bounded durable key."""
+    material = "\0".join(
+        (
+            caller_key,
+            source,
+            candle.instrument_key,
+            candle.interval,
+            candle.opened_at.isoformat(),
+        )
+    )
+    return f"candle:{sha256(material.encode()).hexdigest()}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +131,89 @@ class CandleRecord:
     raw_payload: dict[str, Any]
 
 
+def _latest_per_identity_statement(
+    model: type[Any],
+    identity_columns: tuple[Any, ...],
+    observed_column: Any,
+    *filters: Any,
+) -> Select[tuple[Any]]:
+    """Select one complete, deterministically newest row for every identity."""
+    ranked = (
+        select(
+            model.id.label("row_id"),
+            func.row_number()
+            .over(
+                partition_by=identity_columns,
+                order_by=(
+                    observed_column.desc(),
+                    model.created_at.desc(),
+                    model.id.desc(),
+                ),
+            )
+            .label("identity_rank"),
+        )
+        .where(*filters)
+        .subquery()
+    )
+    return (
+        select(model)
+        .join(ranked, model.id == ranked.c.row_id)
+        .where(ranked.c.identity_rank == 1)
+        .order_by(*identity_columns)
+    )
+
+
+def _latest_observations_statement(
+    *, include_late: bool = False
+) -> Select[tuple[MarketObservationRow]]:
+    filters = () if include_late else (MarketObservationRow.is_late.is_(False),)
+    return _latest_per_identity_statement(
+        MarketObservationRow,
+        (MarketObservationRow.instrument_key,),
+        MarketObservationRow.observed_at,
+        *filters,
+    )
+
+
+def _latest_broker_snapshots_statement(
+    snapshot_kind: str,
+) -> Select[tuple[BrokerSnapshotRow]]:
+    return _latest_per_identity_statement(
+        BrokerSnapshotRow,
+        (BrokerSnapshotRow.snapshot_key,),
+        BrokerSnapshotRow.observed_at,
+        BrokerSnapshotRow.snapshot_kind == snapshot_kind,
+    )
+
+
+def _latest_account_snapshots_statement() -> Select[tuple[AccountSnapshotRow]]:
+    return _latest_per_identity_statement(
+        AccountSnapshotRow,
+        (AccountSnapshotRow.account_key,),
+        AccountSnapshotRow.observed_at,
+    )
+
+
+def _latest_health_transitions_statement() -> Select[tuple[HealthTransitionRow]]:
+    return _latest_per_identity_statement(
+        HealthTransitionRow,
+        (HealthTransitionRow.service,),
+        HealthTransitionRow.observed_at,
+    )
+
+
+def _latest_candles_statement(
+    *, finalized: bool | None = None
+) -> Select[tuple[CandleRow]]:
+    filters = () if finalized is None else (CandleRow.finalized.is_(finalized),)
+    return _latest_per_identity_statement(
+        CandleRow,
+        (CandleRow.instrument_key, CandleRow.interval),
+        CandleRow.opened_at,
+        *filters,
+    )
+
+
 class PostgresRepository:
     """Narrow repository; it deliberately exposes no generic SQL execution surface."""
 
@@ -192,11 +291,7 @@ class PostgresRepository:
         batch_key = _required(idempotency_key, "idempotency_key")
         inserted = 0
         for candle in candles:
-            natural_key = (
-                f"{candle.instrument_key}|{candle.interval}|{candle.opened_at.isoformat()}|"
-                f"{clean_source}"
-            )
-            row_key = f"{batch_key}:{sha256(natural_key.encode()).hexdigest()}"
+            row_key = _candle_idempotency_key(batch_key, clean_source, candle)
             inserted += await self._insert_immutable(
                 CandleRow,
                 instrument_key=candle.instrument_key,
@@ -255,12 +350,9 @@ class PostgresRepository:
         )
 
     async def latest_observations(
-        self, *, include_late: bool = False, limit: int = 500
+        self, *, include_late: bool = False
     ) -> list[ObservationRecord]:
-        statement = select(MarketObservationRow)
-        if not include_late:
-            statement = statement.where(MarketObservationRow.is_late.is_(False))
-        statement = statement.order_by(MarketObservationRow.observed_at.desc()).limit(limit)
+        statement = _latest_observations_statement(include_late=include_late)
         async with self._sessions() as session:
             rows = (await session.scalars(statement)).all()
         return [
@@ -276,14 +368,9 @@ class PostgresRepository:
         ]
 
     async def latest_broker_snapshots(
-        self, snapshot_kind: str, *, limit: int = 100
+        self, snapshot_kind: str
     ) -> list[BrokerSnapshotRecord]:
-        statement = (
-            select(BrokerSnapshotRow)
-            .where(BrokerSnapshotRow.snapshot_kind == snapshot_kind)
-            .order_by(BrokerSnapshotRow.observed_at.desc())
-            .limit(limit)
-        )
+        statement = _latest_broker_snapshots_statement(snapshot_kind)
         async with self._sessions() as session:
             rows = (await session.scalars(statement)).all()
         return [
@@ -298,10 +385,8 @@ class PostgresRepository:
             for row in rows
         ]
 
-    async def latest_account_snapshots(self, *, limit: int = 100) -> list[AccountSnapshotRecord]:
-        statement = select(AccountSnapshotRow).order_by(
-            AccountSnapshotRow.observed_at.desc()
-        ).limit(limit)
+    async def latest_account_snapshots(self) -> list[AccountSnapshotRecord]:
+        statement = _latest_account_snapshots_statement()
         async with self._sessions() as session:
             rows = (await session.scalars(statement)).all()
         return [
@@ -315,12 +400,8 @@ class PostgresRepository:
             for row in rows
         ]
 
-    async def latest_health_transitions(
-        self, *, limit: int = 100
-    ) -> list[HealthTransitionRecord]:
-        statement = select(HealthTransitionRow).order_by(
-            HealthTransitionRow.observed_at.desc()
-        ).limit(limit)
+    async def latest_health_transitions(self) -> list[HealthTransitionRecord]:
+        statement = _latest_health_transitions_statement()
         async with self._sessions() as session:
             rows = (await session.scalars(statement)).all()
         return [
@@ -336,12 +417,9 @@ class PostgresRepository:
         ]
 
     async def latest_candles(
-        self, *, finalized: bool | None = None, limit: int = 500
+        self, *, finalized: bool | None = None
     ) -> list[CandleRecord]:
-        statement = select(CandleRow)
-        if finalized is not None:
-            statement = statement.where(CandleRow.finalized.is_(finalized))
-        statement = statement.order_by(CandleRow.opened_at.desc()).limit(limit)
+        statement = _latest_candles_statement(finalized=finalized)
         async with self._sessions() as session:
             rows = (await session.scalars(statement)).all()
         return [

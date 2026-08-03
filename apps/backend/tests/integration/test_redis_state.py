@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -14,10 +16,11 @@ from testcontainers.core.container import DockerContainer
 from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 from testcontainers.postgres import PostgresContainer
 
-from trading_system.persistence.postgres import PostgresRepository
+from trading_system.persistence.postgres import CandleInput, PostgresRepository
 from trading_system.persistence.redis_state import (
     AccountSummaryState,
     HeartbeatState,
+    InProgressCandleState,
     OptionChainState,
     QuoteState,
     RedisLiveState,
@@ -81,6 +84,15 @@ async def test_typed_json_round_trips_with_exact_ttl_policies(
     await state.set_heartbeat(
         "groww", HeartbeatState(service="groww", observed_at=at, payload={"state": "healthy"})
     )
+    await state.set_in_progress_candle(
+        "NSE:NIFTY50:1m",
+        InProgressCandleState(
+            instrument_key="NSE:NIFTY50",
+            interval="1m",
+            observed_at=at,
+            payload={"open": "25000", "close": "25001"},
+        ),
+    )
     await state.set_account_summary(
         "primary",
         AccountSummaryState(
@@ -102,10 +114,17 @@ async def test_typed_json_round_trips_with_exact_ttl_policies(
     assert await state.get_heartbeat("groww") == HeartbeatState(
         service="groww", observed_at=at, payload={"state": "healthy"}
     )
+    assert (await state.get_option_chain("NSE:NIFTY50:2026-08-06")).payload == {
+        "contracts": []
+    }
+    assert (await state.get_in_progress_candle("NSE:NIFTY50:1m")).interval == "1m"
+    assert (await state.get_account_summary("primary")).account_key == "primary"
+    assert (await state.get_subscription_state("market-feed")).subscription_key == "market-feed"
     expected_ttls = {
         "trading-system:v1:quote:NSE:NIFTY50": 3600,
         "trading-system:v1:option-chain:NSE:NIFTY50:2026-08-06": 3600,
         "trading-system:v1:heartbeat:groww": 30,
+        "trading-system:v1:candle:NSE:NIFTY50:1m": 600,
         "trading-system:v1:account-summary:primary": 300,
         "trading-system:v1:subscription:market-feed": 3600,
     }
@@ -151,12 +170,40 @@ async def test_rebuild_restores_replaceable_state_from_postgres(
         observed_at=at,
         raw_payload={"latency_ms": 10},
     )
+    await repository.save_candles(
+        source="groww_live",
+        idempotency_key="candle:rebuild:18",
+        candles=[
+            CandleInput(
+                instrument_key="NSE:NIFTY50",
+                interval="1m",
+                opened_at=at,
+                closed_at=at + timedelta(minutes=1),
+                open=Decimal("25000"),
+                high=Decimal("25003"),
+                low=Decimal("24999"),
+                close=Decimal("25002"),
+                volume=10,
+                finalized=False,
+                is_late=False,
+                raw_payload={"open": "25000", "close": "25002"},
+            )
+        ],
+    )
+    await state.set_subscription_state(
+        "market-feed",
+        SubscriptionState(
+            subscription_key="market-feed",
+            observed_at=at,
+            payload={"instruments": ["NSE:NIFTY50"]},
+        ),
+    )
 
     await redis_client.flushdb()
     rebuilt = await state.rebuild_from_repository(repository)
     await engine.dispose()
 
-    assert rebuilt == 4
+    assert rebuilt == 5
     assert (await state.get_quote("NSE:NIFTY50")).observed_at == at
     assert (await state.get_option_chain("NSE:NIFTY50:2026-08-06")).payload == {
         "contracts": []
@@ -166,10 +213,32 @@ async def test_rebuild_restores_replaceable_state_from_postgres(
         "detail": {"latency_ms": 10},
         "state": "healthy",
     }
+    assert (await state.get_in_progress_candle("NSE:NIFTY50:1m")).payload == {
+        "close": "25002",
+        "open": "25000",
+    }
+    # Subscription intent deliberately has no durable source; a dead worker's intent expires
+    # and a fresh worker must establish it again after reconnecting.
+    assert await state.get_subscription_state("market-feed") is None
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_expired_heartbeat_is_absent(state: RedisLiveState) -> None:
-    missing = await state.get_heartbeat("missing")
-    assert missing is None
+async def test_existing_heartbeat_really_expires(
+    state: RedisLiveState, redis_client: Redis
+) -> None:
+    key = "trading-system:v1:heartbeat:expiring"
+    await state.set_heartbeat(
+        "expiring",
+        HeartbeatState(
+            service="expiring",
+            observed_at=datetime(2026, 8, 3, 9, 15, tzinfo=UTC),
+            payload={"state": "healthy"},
+        ),
+    )
+    assert 28 <= await redis_client.ttl(key) <= 30
+
+    assert await redis_client.expire(key, 1)
+    await asyncio.sleep(1.1)
+
+    assert await state.get_heartbeat("expiring") is None
