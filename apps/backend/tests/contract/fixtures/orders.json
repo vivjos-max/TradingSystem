@@ -1,0 +1,28 @@
+{
+  "order_list": [
+    {
+      "groww_order_id": "INVENTED-ORDER-0001",
+      "trading_symbol": "NIFTY26AUG24800CE",
+      "order_status": "COMPLETE",
+      "remark": "Invented fixture order",
+      "quantity": 75,
+      "price": 131.25,
+      "trigger_price": 0,
+      "filled_quantity": 75,
+      "remaining_quantity": 0,
+      "average_fill_price": 130.75,
+      "deliverable_quantity": 0,
+      "amo_status": null,
+      "validity": "DAY",
+      "exchange": "NSE",
+      "order_type": "LIMIT",
+      "transaction_type": "BUY",
+      "segment": "FNO",
+      "product": "NRML",
+      "created_at": "2026-08-03T04:10:00Z",
+      "exchange_time": "2026-08-03T04:10:02Z",
+      "trade_date": "2026-08-03T00:00:00Z",
+      "order_reference_id": "INVENTEDREF0001"
+    }
+  ]
+}
