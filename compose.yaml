@@ -25,6 +25,22 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: runtime
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-trading_system}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_system}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    command: ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build:
       context: .
@@ -45,6 +61,8 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -76,11 +94,16 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
       DEPENDENCY_TIMEOUT_SECONDS: 2
       SOURCE_CLOCK_SKEW_SECONDS: ${SOURCE_CLOCK_SKEW_SECONDS:-5}
+      INGESTION_QUEUE_CAPACITY: ${INGESTION_QUEUE_CAPACITY:-4096}
+      INGESTION_BATCH_SIZE: ${INGESTION_BATCH_SIZE:-100}
+      RETENTION_ENABLED: "false"
     command: ["python", "-m", "trading_system.worker"]
     restart: on-failure
     tmpfs:
       - /run/groww-feed:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -91,10 +114,8 @@ services:
       context: .
       dockerfile: apps/frontend/Dockerfile
       target: runtime
-      args:
-        NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8000
     environment:
-      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8000
+      API_ORIGIN: http://api:8000
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:

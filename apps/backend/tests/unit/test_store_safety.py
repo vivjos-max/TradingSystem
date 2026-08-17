@@ -6,7 +6,17 @@ from trading_system.store import Store, _json_value
 
 @pytest.mark.parametrize(
     "key",
-    ["accessToken", "apiKey", "refreshToken", "socketToken", "nkeySeed", "secret", "token", "client_secret", "private_key"],
+    [
+        "accessToken",
+        "apiKey",
+        "refreshToken",
+        "socketToken",
+        "nkeySeed",
+        "secret",
+        "token",
+        "client_secret",
+        "private_key",
+    ],
 )
 def test_store_rejects_secret_bearing_payload_keys(key: str) -> None:
     with pytest.raises(ValueError, match="secret field"):

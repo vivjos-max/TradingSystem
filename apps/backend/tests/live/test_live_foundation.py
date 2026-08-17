@@ -23,12 +23,16 @@ from trading_system.market import resolve_nifty_universe
 
 
 pytestmark = pytest.mark.live
-_EXECUTION_WORDS = re.compile(r"(?:place|modify|cancel|execute|buy|sell|gtt|oco|smart)[_-]?order", re.I)
+_EXECUTION_WORDS = re.compile(
+    r"(?:place|modify|cancel|execute|buy|sell|gtt|oco|smart)[_-]?order", re.I
+)
 
 
 def _get(base_url: str, path: str, *, allow_error: bool = False) -> tuple[int, Any]:
     try:
-        with urlopen(Request(f"{base_url}{path}", headers={"Accept": "application/json"}), timeout=5) as response:
+        with urlopen(
+            Request(f"{base_url}{path}", headers={"Accept": "application/json"}), timeout=5
+        ) as response:
             return response.status, json.load(response)
     except HTTPError as exc:
         if allow_error:
@@ -126,7 +130,9 @@ def live() -> LiveContext:
 
 
 def test_direct_groww_matches_running_api(live: LiveContext) -> None:
-    timestamp_tolerance = timedelta(seconds=int(os.getenv("LIVE_TIMESTAMP_TOLERANCE_SECONDS", "75")))
+    timestamp_tolerance = timedelta(
+        seconds=int(os.getenv("LIVE_TIMESTAMP_TOLERANCE_SECONDS", "75"))
+    )
     price_absolute = Decimal(os.getenv("LIVE_PRICE_ABSOLUTE_TOLERANCE", "5"))
     relative = Decimal(os.getenv("LIVE_VALUE_RELATIVE_TOLERANCE", "0.02"))
 
@@ -144,7 +150,9 @@ def test_direct_groww_matches_running_api(live: LiveContext) -> None:
             "direct and API NIFTY timestamps exceed tolerance",
         )
         _require(
-            _same_number(direct.price, served.get("price"), absolute=price_absolute, relative=relative),
+            _same_number(
+                direct.price, served.get("price"), absolute=price_absolute, relative=relative
+            ),
             "direct and API NIFTY values exceed tolerance",
         )
 
@@ -173,7 +181,9 @@ def test_direct_groww_matches_running_api(live: LiveContext) -> None:
 
 
 def test_redacted_account_and_order_reconciliation(live: LiveContext) -> None:
-    timestamp_tolerance = timedelta(seconds=int(os.getenv("LIVE_TIMESTAMP_TOLERANCE_SECONDS", "75")))
+    timestamp_tolerance = timedelta(
+        seconds=int(os.getenv("LIVE_TIMESTAMP_TOLERANCE_SECONDS", "75"))
+    )
     _require(
         abs(_at(live.api_account.get("source_at")) - live.account.source_at) <= timestamp_tolerance,
         "direct and API account timestamps exceed tolerance",
@@ -196,7 +206,8 @@ def test_redacted_account_and_order_reconciliation(live: LiveContext) -> None:
     _require(direct_positions == served_positions, "direct and API redacted positions differ")
 
     direct_orders = {
-        (item.order_id, item.segment, item.status, item.quantity, len(item.fills)) for item in live.orders
+        (item.order_id, item.segment, item.status, item.quantity, len(item.fills))
+        for item in live.orders
     }
     served_orders = {
         (
@@ -231,7 +242,10 @@ def test_running_openapi_is_get_only(live: LiveContext) -> None:
             {name.casefold() for name in item if name.casefold() in operations} <= {"get", "head"},
             "OpenAPI exposes a mutating operation",
         )
-    _require(not _EXECUTION_WORDS.search(json.dumps(schema.get("components", {}))), "OpenAPI exposes an execution-shaped schema")
+    _require(
+        not _EXECUTION_WORDS.search(json.dumps(schema.get("components", {}))),
+        "OpenAPI exposes an execution-shaped schema",
+    )
 
 
 def test_runtime_did_not_load_contract_fixtures(live: LiveContext) -> None:
@@ -250,7 +264,9 @@ def test_runtime_did_not_load_contract_fixtures(live: LiveContext) -> None:
 
 
 def _observations(instrument: str, start: datetime, end: datetime) -> list[dict[str, Any]]:
-    _require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+", instrument)), "unsafe live instrument identifier")
+    _require(
+        bool(re.fullmatch(r"[A-Za-z0-9_.-]+", instrument)), "unsafe live instrument identifier"
+    )
     query = (
         "SELECT json_build_object('price',normalized->>'price','event_at',normalized->>'event_at',"
         "'received_at',normalized->>'received_at','observation_id',normalized->>'observation_id') "
@@ -260,8 +276,16 @@ def _observations(instrument: str, start: datetime, end: datetime) -> list[dict[
         "ORDER BY event_at,received_at,normalized->>'observation_id';"
     )
     command = [
-        "docker", "compose", "exec", "-T", "postgres", "sh", "-lc",
-        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -c "$1"', "psql", query,
+        "docker",
+        "compose",
+        "exec",
+        "-T",
+        "postgres",
+        "sh",
+        "-lc",
+        'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -c "$1"',
+        "psql",
+        query,
     ]
     result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
     _require(result.returncode == 0, "durable observation query failed")
@@ -275,12 +299,17 @@ def test_candles_match_durable_live_observations(live: LiveContext) -> None:
     _, status = _get(live.base_url, "/api/v1/system/status")
     if status.get("state") == "MARKET_CLOSED":
         pytest.skip("MARKET_CLOSED: feed/candle proof is pending an exchange-open observation")
-    _require(status.get("state") in {"LIVE", "DEGRADED"}, "market-hours candle proof requires healthy live state")
+    _require(
+        status.get("state") in {"LIVE", "DEGRADED"},
+        "market-hours candle proof requires healthy live state",
+    )
 
     deadline = time.monotonic() + int(os.getenv("LIVE_CANDLE_WAIT_SECONDS", "90"))
     payload: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        code, candidate = _get(live.base_url, "/api/v1/market/nifty/candles?interval=1m", allow_error=True)
+        code, candidate = _get(
+            live.base_url, "/api/v1/market/nifty/candles?interval=1m", allow_error=True
+        )
         if code == 200 and candidate.get("candles"):
             age = datetime.now(timezone.utc) - _at(candidate["candles"][-1]["bucket_start"])
             if timedelta(minutes=-1) <= age <= timedelta(minutes=3):
@@ -292,7 +321,10 @@ def test_candles_match_durable_live_observations(live: LiveContext) -> None:
     candle = payload["candles"][-1]
     start = _at(candle["bucket_start"])
     age = datetime.now(timezone.utc) - start
-    _require(timedelta(minutes=-1) <= age <= timedelta(minutes=3), "latest 1m candle is stale or future-dated")
+    _require(
+        timedelta(minutes=-1) <= age <= timedelta(minutes=3),
+        "latest 1m candle is stale or future-dated",
+    )
     rows = _observations(candle["instrument"], start, start + timedelta(minutes=1))
     _require(bool(rows), "stored 1m candle has no durable live observations")
     prices = [Decimal(row["price"]) for row in rows]
@@ -303,18 +335,26 @@ def test_candles_match_durable_live_observations(live: LiveContext) -> None:
     five_deadline = time.monotonic() + int(os.getenv("LIVE_FIVE_MINUTE_WAIT_SECONDS", "420"))
     five_payload: dict[str, Any] = {}
     while time.monotonic() < five_deadline:
-        code, candidate = _get(live.base_url, "/api/v1/market/nifty/candles?interval=5m", allow_error=True)
+        code, candidate = _get(
+            live.base_url, "/api/v1/market/nifty/candles?interval=5m", allow_error=True
+        )
         if code == 200 and candidate.get("candles"):
             age = datetime.now(timezone.utc) - _at(candidate["candles"][-1]["bucket_start"])
             if timedelta(minutes=-1) <= age <= timedelta(minutes=10):
                 five_payload = candidate
                 break
         time.sleep(2)
-    _require(bool(five_payload), "no fresh complete five-minute live window was available within the acceptance window")
+    _require(
+        bool(five_payload),
+        "no fresh complete five-minute live window was available within the acceptance window",
+    )
     five = five_payload["candles"][-1]
     five_start = _at(five["bucket_start"])
     five_age = datetime.now(timezone.utc) - five_start
-    _require(timedelta(minutes=-1) <= five_age <= timedelta(minutes=10), "latest 5m candle is stale or future-dated")
+    _require(
+        timedelta(minutes=-1) <= five_age <= timedelta(minutes=10),
+        "latest 5m candle is stale or future-dated",
+    )
     rows = _observations(five["instrument"], five_start, five_start + timedelta(minutes=5))
     minutes: list[tuple[Decimal, Decimal, Decimal, Decimal]] = []
     for offset in range(5):
@@ -326,7 +366,12 @@ def test_candles_match_durable_live_observations(live: LiveContext) -> None:
         ]
         _require(bool(values), "stored 5m candle is missing a durable source minute")
         minutes.append((values[0], max(values), min(values), values[-1]))
-    expected_five = (minutes[0][0], max(row[1] for row in minutes), min(row[2] for row in minutes), minutes[-1][3])
+    expected_five = (
+        minutes[0][0],
+        max(row[1] for row in minutes),
+        min(row[2] for row in minutes),
+        minutes[-1][3],
+    )
     actual_five = tuple(Decimal(str(five[name])) for name in ("open", "high", "low", "close"))
     _require(actual_five == expected_five, "stored 5m OHLC differs from durable live observations")
 

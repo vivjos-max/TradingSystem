@@ -6,8 +6,7 @@ COPY apps/frontend/package.json apps/frontend/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY apps/frontend/tsconfig.json apps/frontend/next.config.ts ./
 COPY apps/frontend/src ./src
-ARG NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
-ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
 
 FROM node:24-alpine AS runtime
@@ -18,4 +17,3 @@ COPY --from=build --chown=node:node /app/.next/static ./.next/static
 USER node
 EXPOSE 3000
 CMD ["node", "server.js"]
-

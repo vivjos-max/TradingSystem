@@ -16,7 +16,15 @@ from trading_system.models import (
     Quote,
 )
 from trading_system.groww import GrowwError
-from trading_system.worker import Worker, best_prices, bounded_backoff, broker_failure_blocks, feed_datetime, feed_is_silent, feed_problem_demotes
+from trading_system.worker import (
+    Worker,
+    best_prices,
+    bounded_backoff,
+    broker_failure_blocks,
+    feed_datetime,
+    feed_is_silent,
+    feed_problem_demotes,
+)
 
 UTC = timezone.utc
 
@@ -96,7 +104,10 @@ class Client:
         self.account_calls = self.market_calls = 0
         self.audit_raw = {
             "instruments": {"rows": [{"trading_symbol": "NIFTY"}]},
-            "market_snapshot": {"spot_quote": {"last_price": 22110}, "option_chain": {"strikes": {}}},
+            "market_snapshot": {
+                "spot_quote": {"last_price": 22110},
+                "option_chain": {"strikes": {}},
+            },
             "account_snapshot": {"margin": {"clear_cash": 1000}},
             "orders_and_fills": {"order_pages": []},
         }
@@ -119,14 +130,26 @@ class Client:
         self.market_calls += 1
         return (
             NiftySnapshot(
-                spot=Quote(instrument=universe.spot, price=Decimal("22110"), source=DataSource.GROWW_LIVE, source_at=observed_at),
-                future=Quote(instrument=universe.future, price=Decimal("22150"), source=DataSource.GROWW_LIVE, source_at=observed_at),
+                spot=Quote(
+                    instrument=universe.spot,
+                    price=Decimal("22110"),
+                    source=DataSource.GROWW_LIVE,
+                    source_at=observed_at,
+                ),
+                future=Quote(
+                    instrument=universe.future,
+                    price=Decimal("22150"),
+                    source=DataSource.GROWW_LIVE,
+                    source_at=observed_at,
+                ),
             ),
             OptionWindow(
                 expiry=universe.option_expiry,
                 atm_strike=universe.atm_strike,
                 contracts=tuple(
-                    OptionSnapshot(instrument=item, source=DataSource.GROWW_LIVE, source_at=observed_at)
+                    OptionSnapshot(
+                        instrument=item, source=DataSource.GROWW_LIVE, source_at=observed_at
+                    )
                     for item in universe.options
                 ),
                 source_at=observed_at,
@@ -152,12 +175,14 @@ class Feed:
 
     def __getattr__(self, name):
         if name.startswith("subscribe_") or name.startswith("unsubscribe_"):
+
             def call(items, callback=None):
                 self.calls.append((name, tuple(item.trading_symbol for item in items)))
                 if name == "subscribe_market_depth" and self.fail_depth:
                     raise RuntimeError("depth unavailable")
                 if name == self.fail_unsubscribe:
                     raise RuntimeError("unsubscribe unavailable")
+
             return call
         if name.startswith("get_"):
             return lambda: self.values[name]
@@ -167,9 +192,16 @@ class Feed:
 def make_worker(clock=None):
     clock = clock or Clock(datetime(2026, 8, 10, 4, 1, tzinfo=UTC))
     store = MemoryStore()
-    worker = Worker(Settings(groww_totp_token="token", groww_totp_secret="secret"), store, clock=clock, jitter=lambda: 0)
+    worker = Worker(
+        Settings(groww_totp_token="token", groww_totp_secret="secret"),
+        store,
+        clock=clock,
+        jitter=lambda: 0,
+    )
     worker.instruments = INSTRUMENTS
-    worker.universe = __import__("trading_system.market", fromlist=["resolve_nifty_universe"]).resolve_nifty_universe(INSTRUMENTS, Decimal("22110"), date(2026, 8, 10))
+    worker.universe = __import__(
+        "trading_system.market", fromlist=["resolve_nifty_universe"]
+    ).resolve_nifty_universe(INSTRUMENTS, Decimal("22110"), date(2026, 8, 10))
     worker._instrument_day = clock().date()
     worker._session_open = True
     return worker, store, clock
@@ -190,13 +222,17 @@ def test_startup_order_and_readiness_waits_for_feed() -> None:
     assert log.index("spot") < log.index("market")
     assert log.index("account") < log.index("account_snapshot")
     assert log.index("orders") < log.index("account_snapshot")
-    assert store.events[("GROWW", next(key[1] for key in store.events if key[1].startswith("market:")))]["raw"]
+    assert store.events[
+        ("GROWW", next(key[1] for key in store.events if key[1].startswith("market:")))
+    ]["raw"]
     assert not worker.readiness.is_ready
 
     feed = Feed()
     worker.start_feed(feed)
     assert not worker.readiness.is_ready
-    feed.values["get_index_value"] = {"NSE": {"CASH": {"NIFTY": {"value": 22110, "tsInMillis": 1786334400000}}}}
+    feed.values["get_index_value"] = {
+        "NSE": {"CASH": {"NIFTY": {"value": 22110, "tsInMillis": 1786334400000}}}
+    }
     worker._index_callback({"exchange": "NSE", "segment": "CASH", "feed_key": "NIFTY"})
     assert worker.readiness.is_ready
 
@@ -231,18 +267,24 @@ def test_callback_deduplicates_and_audits_late_event() -> None:
     feed = Feed()
     worker.feed = feed
     meta = {"exchange": "NSE", "segment": "CASH", "feed_key": "NIFTY"}
-    feed.values["get_index_value"] = {"NSE": {"CASH": {"NIFTY": {"value": 100, "tsInMillis": 1786334405000}}}}
+    feed.values["get_index_value"] = {
+        "NSE": {"CASH": {"NIFTY": {"value": 100, "tsInMillis": 1786334405000}}}
+    }
     worker._index_callback(meta)
     first_quote = store.live[("quote", "NIFTY", None)]
     worker._index_callback(meta)
     clock.now = datetime(2026, 8, 10, 4, 1, tzinfo=UTC)
     worker._finalize(clock())
-    feed.values["get_index_value"]["NSE"]["CASH"]["NIFTY"] = {"value": 99, "tsInMillis": 1786334440000}
+    feed.values["get_index_value"]["NSE"]["CASH"]["NIFTY"] = {
+        "value": 99,
+        "tsInMillis": 1786334440000,
+    }
     worker._index_callback(meta)
 
-    observations = [event for event in store.events.values() if event["kind"] == "market_observation"]
-    assert len(observations) == 2
-    assert observations[-1]["late"] is True
+    observations = [
+        event for event in store.events.values() if event["kind"] == "market_observation"
+    ]
+    assert [str(event["outcome"]) for event in observations] == ["ACCEPTED", "DUPLICATE", "STALE"]
     assert store.live[("quote", "NIFTY", None)] == first_quote
 
 
@@ -259,17 +301,21 @@ def test_future_feed_events_are_audited_but_never_promoted_live() -> None:
     }
     worker._ltp_callback(meta)
     worker.feed.values["get_market_depth"] = {
-        "NSE": {"FNO": {option.exchange_token: {
-            "buyBook": [{"value": {"price": 100}}],
-            "sellBook": [{"value": {"price": 102}}],
-            "tsInMillis": timestamp,
-        }}}
+        "NSE": {
+            "FNO": {
+                option.exchange_token: {
+                    "buyBook": [{"value": {"price": 100}}],
+                    "sellBook": [{"value": {"price": 102}}],
+                    "tsInMillis": timestamp,
+                }
+            }
+        }
     }
     worker._depth_callback(meta)
 
     assert worker.readiness.first_feed is False
     assert ("quote", option.trading_symbol, None) not in store.live
-    assert store.live[("heartbeat", "feed", None)]["reason"] == "FEED_EVENT_FUTURE"
+    assert store.live[("heartbeat", "feed", None)]["reason"] == "FUTURE_TIMESTAMP"
     assert [event["late"] for event in store.events.values()] == [True, True]
     worker._finalize(clock() + timedelta(minutes=5))
     assert store.candles == []
@@ -289,17 +335,54 @@ def test_closed_session_feed_event_is_audited_without_live_state() -> None:
     assert next(iter(store.events.values()))["late"] is True
 
 
+def test_inactive_generation_is_recorded_without_touching_old_feed_getter() -> None:
+    worker, store, _ = make_worker()
+    worker.feed = Feed()
+
+    def forbidden_read():
+        raise AssertionError("inactive feed getter must not be called")
+
+    worker._price_callback(
+        {"exchange": "NSE", "segment": "CASH", "feed_key": "NIFTY"},
+        forbidden_read,
+        "value",
+        Feed(),
+    )
+    event = next(iter(store.events.values()))
+    assert str(event["outcome"]) == "INACTIVE_FEED_GENERATION"
+    assert ("quote", "NIFTY", None) not in store.live
+
+
 def test_depth_uses_price_extrema_and_preserves_missing_side() -> None:
-    assert best_prices({"buyBook": [{"value": {"price": 10}}, {"value": {"price": 12}}], "sellBook": [{"value": {"price": 15}}, {"value": {"price": 14}}]}) == (Decimal("12"), Decimal("14"))
-    assert best_prices({"buyBook": [{"value": {"price": 12}}], "sellBook": []}) == (Decimal("12"), None)
+    assert best_prices(
+        {
+            "buyBook": [{"value": {"price": 10}}, {"value": {"price": 12}}],
+            "sellBook": [{"value": {"price": 15}}, {"value": {"price": 14}}],
+        }
+    ) == (Decimal("12"), Decimal("14"))
+    assert best_prices({"buyBook": [{"value": {"price": 12}}], "sellBook": []}) == (
+        Decimal("12"),
+        None,
+    )
 
     worker, store, _ = make_worker(Clock(datetime(2026, 8, 10, 4, 0, 5, tzinfo=UTC)))
     worker.feed = Feed()
     option = OPTIONS[0]
-    worker.feed.values["get_market_depth"] = {"NSE": {"FNO": {option.exchange_token: {"buyBook": [{"value": {"price": 12}}], "sellBook": [], "tsInMillis": 1786334405000}}}}
+    worker.feed.values["get_market_depth"] = {
+        "NSE": {
+            "FNO": {
+                option.exchange_token: {
+                    "buyBook": [{"value": {"price": 12}}],
+                    "sellBook": [],
+                    "tsInMillis": 1786334405000,
+                }
+            }
+        }
+    }
     worker._depth_callback({"exchange": "NSE", "segment": "FNO", "feed_key": option.exchange_token})
-    value = store.live[("quote", option.trading_symbol, None)]
-    assert value["bid"] == Decimal("12") and value["ask"] is None and value["spread"] is None
+    value = store.live[("option-contract", option.trading_symbol, None)]
+    assert value["bid"]["value"] == Decimal("12")
+    assert value["ask"]["value"] is None and value["depth"]["value"]["spread"] is None
     assert store.live[("heartbeat", "depth", None)]["state"] == "DEGRADED"
 
 
@@ -319,7 +402,9 @@ def test_sixty_second_refresh_backoff_swap_rollback_and_shutdown() -> None:
     worker.feed = feed
     old = worker.universe
     added = instrument("NIFTY-22300-CE", "OPTIDX", strike=Decimal("22300"), option_type="CE")
-    new = old.model_copy(update={"options": (*old.options[:-2], added), "atm_strike": Decimal("22300")})
+    new = old.model_copy(
+        update={"options": (*old.options[:-2], added), "atm_strike": Decimal("22300")}
+    )
     worker.swap_universe(new)
     write_index = next(i for i, call in enumerate(feed.calls) if call[0] == "subscribe_ltp")
     remove_index = next(i for i, call in enumerate(feed.calls) if call[0] == "unsubscribe_ltp")
@@ -328,7 +413,9 @@ def test_sixty_second_refresh_backoff_swap_rollback_and_shutdown() -> None:
     worker.universe = old
     feed.calls.clear()
     feed.fail_depth = True
-    failed = old.model_copy(update={"options": (*old.options[:-4], added), "atm_strike": Decimal("22300")})
+    failed = old.model_copy(
+        update={"options": (*old.options[:-4], added), "atm_strike": Decimal("22300")}
+    )
     try:
         worker.swap_universe(failed)
     except RuntimeError:
@@ -340,7 +427,9 @@ def test_sixty_second_refresh_backoff_swap_rollback_and_shutdown() -> None:
     feed.fail_unsubscribe = "unsubscribe_market_depth"
     worker.stop()
     assert [call[0] for call in feed.calls[-3:]] == [
-        "unsubscribe_market_depth", "unsubscribe_ltp", "unsubscribe_index_value"
+        "unsubscribe_market_depth",
+        "unsubscribe_ltp",
+        "unsubscribe_index_value",
     ]
 
 
@@ -375,14 +464,18 @@ def test_store_health_loss_blocks_then_rebuilds_and_reconciles_before_recovery()
     store.fail_health = False
     store.live.clear()
     worker.tick()
-    assert worker.readiness.stores and worker.readiness.reconciled and worker.readiness.subscriptions
+    assert (
+        worker.readiness.stores and worker.readiness.reconciled and worker.readiness.subscriptions
+    )
     assert worker.readiness.first_feed is False
     assert worker.client.account_calls == 1 and worker.client.market_calls == 1
     assert ("subscription", None, None) in store.live
 
 
 @pytest.mark.parametrize("failure", ["silence", "tick"])
-def test_established_feed_failure_reconnects_after_backoff_and_cleans_subscription(monkeypatch, failure) -> None:
+def test_established_feed_failure_exits_for_supervisor_and_cleans_subscription(
+    monkeypatch, failure
+) -> None:
     class CapturingStore(MemoryStore):
         def __init__(self):
             super().__init__()
@@ -401,20 +494,17 @@ def test_established_feed_failure_reconnects_after_backoff_and_cleans_subscripti
         def consume(self):
             self.release.wait(3)
 
-    class ReconnectingClient(Client):
+    class OneShotClient(Client):
         def __init__(self):
             super().__init__()
             self.connections = 0
             self.feeds = []
-            self.worker = None
 
         @contextmanager
         def open_feed(self, _credential_dir):
             self.connections += 1
             feed = ConsumingFeed()
             self.feeds.append(feed)
-            if self.connections == 2:
-                self.worker._stopping.set()
             try:
                 yield feed
             finally:
@@ -427,15 +517,7 @@ def test_established_feed_failure_reconnects_after_backoff_and_cleans_subscripti
             "feed_is_silent",
             lambda *_args: stale_checks.pop(0) if stale_checks else False,
         )
-    waits = []
-
-    def zero_backoff(_jitter):
-        while True:
-            waits.append(0)
-            yield 0
-
-    monkeypatch.setattr(worker_module, "bounded_backoff", zero_backoff)
-    store, client = CapturingStore(), ReconnectingClient()
+    store, client = CapturingStore(), OneShotClient()
     worker = Worker(
         Settings(groww_totp_token="token", groww_totp_secret="secret"),
         store,
@@ -443,15 +525,17 @@ def test_established_feed_failure_reconnects_after_backoff_and_cleans_subscripti
         clock=Clock(datetime(2026, 8, 10, 4, 1, tzinfo=UTC)),
         jitter=lambda: 0,
     )
-    client.worker = worker
     if failure == "tick":
         worker.tick = lambda: (_ for _ in ()).throw(RuntimeError("tick failed"))
-    worker.run()
+    with pytest.raises((worker_module.FeedRestartRequired, RuntimeError)):
+        worker.run()
 
-    assert client.connections == 2 and waits == [0]
-    assert ("feed", "STALE", "FEED_RESTART_REQUIRED") in store.heartbeats
+    assert client.connections == 1
+    assert ("feed", "BLOCKED", "FEED_PROCESS_RESTART_REQUIRED") in store.heartbeats
     assert [call[0] for call in client.feeds[0].calls[-3:]] == [
-        "unsubscribe_market_depth", "unsubscribe_ltp", "unsubscribe_index_value"
+        "unsubscribe_market_depth",
+        "unsubscribe_ltp",
+        "unsubscribe_index_value",
     ]
 
 

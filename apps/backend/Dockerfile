@@ -8,6 +8,7 @@ RUN python -m pip install --no-cache-dir -r requirements.lock
 
 FROM base AS test
 COPY apps/backend/pyproject.toml ./pyproject.toml
+COPY apps/backend/alembic.ini ./alembic.ini
 COPY apps/backend/src ./src
 COPY apps/backend/config ./config
 COPY apps/backend/migrations ./migrations
@@ -18,9 +19,10 @@ CMD ["python", "-m", "pytest", "tests", "-q"]
 
 FROM base AS runtime
 COPY apps/backend/pyproject.toml ./pyproject.toml
+COPY apps/backend/alembic.ini ./alembic.ini
 COPY apps/backend/src ./src
 COPY apps/backend/config ./config
+COPY apps/backend/migrations ./migrations
 RUN python -m pip install --no-cache-dir --no-deps -e . && chown -R app:app /app
 USER app
 CMD ["python", "-m", "uvicorn", "trading_system.api:app", "--host", "0.0.0.0", "--port", "8000"]
-

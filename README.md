@@ -23,7 +23,7 @@ docker compose --env-file $envFile ps
 
 Open <http://127.0.0.1:3000>. The read API is at <http://127.0.0.1:8000/openapi.json>. Only those two localhost ports are published.
 
-Startup is deliberately strict: PostgreSQL and Redis must be healthy, account reconciliation must finish, subscriptions must be active, and one valid live feed event must arrive before readiness becomes true.
+Startup is deliberately strict: migrations, PostgreSQL and Redis must be healthy, account reconciliation must finish, subscriptions must be active, and one valid live feed event must arrive before readiness becomes true. The browser calls the API through the same-origin `/backend` route; no account endpoint is bound to the LAN.
 
 ## Local verification
 
@@ -55,4 +55,11 @@ The Docker test target runs on Python 3.12 and includes the real PostgreSQL/Redi
 - PostgreSQL/Redis unavailable: install/start Docker Desktop and inspect `docker compose ps`.
 - No feed during an open session: verify API subscription, segment entitlement, and local connectivity; do not add fixture fallback.
 
-PostgreSQL uses a named durable volume. After live data exists, do not run `docker compose down -v`. This MVP uses one native initialization migration; design an additive migration before changing the live schema.
+PostgreSQL uses a named durable volume. After live data exists, do not run `docker compose down -v`. Alembic migrations are forward-only; restore a verified backup for recovery.
+
+## Phase 0 invariants
+
+- One worker process owns exactly one Groww feed generation. Feed death or silence makes the worker unhealthy and exits non-zero so Compose creates a fresh process.
+- Accepted state is published only after durable event persistence. The bounded queue defaults to 4,096 events with batches of 100; queue overflow or persistence failure terminates the worker rather than dropping authoritative state.
+- Default freshness limits are feed 10s, quotes 15s, options/account 60s, and source clock skew 5s. These protect operational correctness and remain configurable; they are not strategy thresholds.
+- Retention is disabled in Phase 0. The approved future policy is depth current+previous session, raw events five completed sessions, and indefinite Phase 0 candle/account/order/fill/health retention. Enable it only after event outcomes have been observed in live operation.

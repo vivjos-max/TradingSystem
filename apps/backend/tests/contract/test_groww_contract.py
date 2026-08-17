@@ -67,6 +67,8 @@ def test_documented_shapes_normalize_without_market_depth_synthesis():
     assert options.contracts[1].ltp is None and options.contracts[1].volume is None
     assert account.available_margin == Decimal("96.21")
     assert account.positions[0].average_price == Decimal("22400")
+    assert account.positions[0].realized_pnl == Decimal("500")
+    assert account.positions[0].realized_pnl_source == "BROKER"
     assert orders[0].fills[0].trade_id == "TRADE-1"
     assert client.audit_raw["market_snapshot"]["spot_quote"] == fixture("quote.json")
     assert client.audit_raw["account_snapshot"]["margin"] == fixture("margin.json")
@@ -108,7 +110,6 @@ def test_index_quote_can_use_receipt_time_but_tradable_quote_time_is_required():
 
 
 def test_missing_required_option_contract_fails_closed():
-
     class PartialChain(DocumentedSDK):
         def get_option_chain(self, **kwargs):
             payload = fixture("option_chain.json")

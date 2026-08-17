@@ -2,26 +2,29 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import psycopg
+from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, SecretBytes, SecretStr
 from redis import Redis
 from redis.exceptions import RedisError
 
-from .models import Candle, HealthState
+from .models import Candle, EventOutcome, HealthState, MarketObservation, PersistedEvent
 
 _PREFIX = "trading-system:v1:"
 _TTLS = {
     "quote": 3600,
     "option-chain": 3600,
+    "option-contract": 3600,
     "candle": 600,
     "heartbeat": 30,
     "account": 300,
@@ -70,7 +73,9 @@ def _json_value(value: Any) -> Any:
         result = {}
         for key, item in value.items():
             name = str(key)
-            normalized_name = "".join(character for character in name.casefold() if character.isalnum())
+            normalized_name = "".join(
+                character for character in name.casefold() if character.isalnum()
+            )
             if normalized_name in _SENSITIVE_KEYS:
                 raise ValueError(f"secret field cannot be stored: {name}")
             result[name] = _json_value(item)
@@ -93,6 +98,19 @@ def _json_value(value: Any) -> Any:
 class Store:
     def __init__(self, database_url: str, redis_url: str, *, timeout_seconds: int = 2) -> None:
         self._database_url = database_url
+        self._pool = ConnectionPool(
+            database_url,
+            min_size=1,
+            max_size=4,
+            open=False,
+            kwargs={
+                "connect_timeout": timeout_seconds,
+                "options": "-c timezone=UTC",
+                "row_factory": dict_row,
+            },
+        )
+        self._pool_open = False
+        self._pool_lock = threading.Lock()
         self._redis = Redis.from_url(
             redis_url,
             decode_responses=True,
@@ -105,14 +123,14 @@ class Store:
     @contextmanager
     def _postgres(self) -> Iterator[psycopg.Connection[dict[str, Any]]]:
         try:
-            with psycopg.connect(
-                self._database_url,
-                connect_timeout=self._timeout_seconds,
-                options="-c timezone=UTC",
-                row_factory=dict_row,
-            ) as connection:
-                yield connection
-        except psycopg.OperationalError:
+            if not self._pool_open:
+                with self._pool_lock:
+                    if not self._pool_open:
+                        self._pool.open(wait=True, timeout=self._timeout_seconds)
+                        self._pool_open = True
+            with self._pool.connection(timeout=self._timeout_seconds) as connection:
+                yield cast(psycopg.Connection[dict[str, Any]], connection)
+        except (psycopg.OperationalError, TimeoutError):
             raise StoreUnavailableError("BLOCKED: PostgreSQL is unavailable") from None
 
     def _redis_call(self, method: str, *args: Any, **kwargs: Any) -> Any:
@@ -137,28 +155,66 @@ class Store:
         raw: Mapping[str, Any],
         normalized: Mapping[str, Any],
         late: bool = False,
+        outcome: EventOutcome | None = None,
+        event_identity: str | None = None,
+        feed_generation: str | None = None,
+        processed_at: datetime | None = None,
+        rejection_detail: str | None = None,
     ) -> bool:
-        with self._postgres() as connection:
-            row = connection.execute(
-                """
-                INSERT INTO events
-                    (kind, source, idempotency_key, event_at, received_at, raw, normalized, late)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (source, idempotency_key) DO NOTHING
-                RETURNING id
-                """,
+        selected_outcome = outcome or (EventOutcome.OTHER if late else EventOutcome.ACCEPTED)
+        event = PersistedEvent(
+            kind=kind,
+            source=source,
+            idempotency_key=idempotency_key,
+            event_identity=event_identity or idempotency_key,
+            event_at=event_at,
+            received_at=received_at,
+            processed_at=processed_at or datetime.now(timezone.utc),
+            raw=dict(raw),
+            normalized=dict(normalized),
+            outcome=selected_outcome,
+            feed_generation=feed_generation,
+            rejection_detail=rejection_detail,
+        )
+        return bool(self.append_events((event,)))
+
+    def append_events(self, events: tuple[PersistedEvent, ...] | list[PersistedEvent]) -> set[str]:
+        if not events:
+            return set()
+        placeholders = ",".join(["(" + ",".join(["%s"] * 13) + ")"] * len(events))
+        values: list[Any] = []
+        for event in events:
+            values.extend(
                 (
-                    kind,
-                    source,
-                    idempotency_key,
-                    _utc(event_at),
-                    _utc(received_at),
-                    Jsonb(_json_value(raw)),
-                    Jsonb(_json_value(normalized)),
-                    late,
-                ),
-            ).fetchone()
-        return row is not None
+                    event.kind,
+                    event.source,
+                    event.idempotency_key,
+                    event.event_identity,
+                    _utc(event.event_at),
+                    _utc(event.received_at),
+                    _utc(event.processed_at),
+                    Jsonb(_json_value(event.raw)),
+                    Jsonb(_json_value(event.normalized)),
+                    event.outcome is not EventOutcome.ACCEPTED,
+                    str(event.outcome),
+                    event.feed_generation,
+                    event.rejection_detail,
+                )
+            )
+        with self._postgres() as connection:
+            rows = connection.execute(
+                f"""
+                INSERT INTO events
+                    (kind, source, idempotency_key, event_identity, event_at, received_at,
+                     processed_at, raw, normalized, late, outcome, feed_generation,
+                     rejection_detail)
+                VALUES {placeholders}
+                ON CONFLICT DO NOTHING
+                RETURNING idempotency_key
+                """,
+                values,
+            ).fetchall()
+        return {row["idempotency_key"] for row in rows}
 
     def read_events(
         self,
@@ -190,8 +246,9 @@ class Store:
                 """
                 INSERT INTO candles
                     (instrument, interval, bucket_start, open, high, low, close, volume,
-                     source, finalized, observation_ids)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     source, finalized, completeness, expected_components, actual_components,
+                     source_event_at_min, source_event_at_max, observation_ids)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (instrument, interval, bucket_start, source) DO UPDATE SET
                     open = EXCLUDED.open,
                     high = EXCLUDED.high,
@@ -199,6 +256,11 @@ class Store:
                     close = EXCLUDED.close,
                     volume = EXCLUDED.volume,
                     finalized = EXCLUDED.finalized,
+                    completeness = EXCLUDED.completeness,
+                    expected_components = EXCLUDED.expected_components,
+                    actual_components = EXCLUDED.actual_components,
+                    source_event_at_min = EXCLUDED.source_event_at_min,
+                    source_event_at_max = EXCLUDED.source_event_at_max,
                     observation_ids = EXCLUDED.observation_ids
                 WHERE NOT candles.finalized AND
                     (candles.open, candles.high, candles.low, candles.close, candles.volume,
@@ -219,6 +281,11 @@ class Store:
                     candle.volume,
                     str(candle.source),
                     candle.finalized,
+                    str(candle.completeness),
+                    candle.expected_components,
+                    candle.actual_components,
+                    candle.source_event_at_min,
+                    candle.source_event_at_max,
                     Jsonb(list(candle.observation_ids)),
                 ),
             ).fetchone()
@@ -236,10 +303,19 @@ class Store:
         with self._postgres() as connection:
             rows = connection.execute(
                 """
-                SELECT instrument, interval, bucket_start, open, high, low, close, volume,
-                       source, finalized, observation_ids
-                FROM candles
-                WHERE instrument = %s AND interval = %s
+                SELECT * FROM (
+                    SELECT DISTINCT ON (bucket_start)
+                           instrument, interval, bucket_start, open, high, low, close, volume,
+                           source, finalized, completeness, expected_components, actual_components,
+                           source_event_at_min, source_event_at_max, observation_ids
+                    FROM candles
+                    WHERE instrument = %s AND interval = %s
+                    ORDER BY bucket_start DESC, CASE source
+                        WHEN 'LIVE_ACCEPTED' THEN 1
+                        WHEN 'DURABLE_RECONSTRUCTED' THEN 2
+                        WHEN 'GROWW_HISTORICAL' THEN 3
+                        ELSE 4 END
+                ) canonical
                 ORDER BY bucket_start DESC
                 LIMIT %s
                 """,
@@ -273,13 +349,13 @@ class Store:
     def _live_key(kind: str, identifier: str | None, interval: str | None) -> str:
         if kind not in _TTLS:
             raise ValueError(f"unknown live value kind: {kind}")
-        if kind in {"quote", "heartbeat"}:
+        if kind in {"quote", "heartbeat", "option-contract"}:
             if not identifier or interval is not None:
                 raise ValueError(f"{kind} requires one identifier")
             suffix = f"{kind}:{identifier}"
         elif kind == "candle":
-            if not identifier or interval not in {"1m", "5m"}:
-                raise ValueError("candle requires an identifier and 1m or 5m interval")
+            if not identifier or interval not in {"1m", "5m", "15m"}:
+                raise ValueError("candle requires an identifier and 1m, 5m, or 15m interval")
             suffix = f"candle:{identifier}:{interval}"
         else:
             if identifier is not None or interval is not None:
@@ -297,7 +373,7 @@ class Store:
     ) -> None:
         key = self._live_key(kind, identifier, interval)
         payload = json.dumps(_json_value(value), separators=(",", ":"), sort_keys=True)
-        self._redis_call("setex", key, _TTLS[kind], payload)
+        self._redis_call("set", key, payload, ex=_TTLS[kind])
 
     def get_live_value(
         self,
@@ -308,6 +384,31 @@ class Store:
     ) -> Any | None:
         payload = self._redis_call("get", self._live_key(kind, identifier, interval))
         return None if payload is None else json.loads(payload)
+
+    def claim_event(self, event_identity: str, *, ttl_seconds: int = 86400) -> bool:
+        if not event_identity.strip():
+            raise ValueError("event identity must not be blank")
+        return bool(
+            self._redis_call(
+                "set", f"{_PREFIX}event:{event_identity}", "1", ex=ttl_seconds, nx=True
+            )
+        )
+
+    def release_event_claim(self, event_identity: str) -> None:
+        self._redis_call("delete", f"{_PREFIX}event:{event_identity}")
+
+    def accepted_observations(self, *, since: datetime) -> list[MarketObservation]:
+        with self._postgres() as connection:
+            rows = connection.execute(
+                """
+                SELECT normalized
+                FROM events
+                WHERE kind = 'market_observation' AND outcome = 'ACCEPTED' AND event_at >= %s
+                ORDER BY event_at, received_at, id
+                """,
+                (_utc(since),),
+            ).fetchall()
+        return [MarketObservation(**row["normalized"]) for row in rows]
 
     def rebuild_live_state(self) -> int:
         event_kinds = (
@@ -331,7 +432,7 @@ class Store:
                                ORDER BY event_at DESC, received_at DESC, id DESC
                            ) AS latest
                     FROM events
-                    WHERE kind = ANY(%s)
+                    WHERE kind = ANY(%s) AND outcome = 'ACCEPTED'
                 ) candidates
                 WHERE latest = 1
                 ORDER BY event_at DESC, received_at DESC, id DESC
@@ -342,7 +443,8 @@ class Store:
                 """
                 SELECT DISTINCT ON (instrument, interval)
                        instrument, interval, bucket_start, open, high, low, close, volume,
-                       source, finalized, observation_ids
+                       source, finalized, completeness, expected_components, actual_components,
+                       source_event_at_min, source_event_at_max, observation_ids
                 FROM candles
                 ORDER BY instrument, interval, bucket_start DESC
                 """
@@ -383,3 +485,5 @@ class Store:
 
     def close(self) -> None:
         self._redis.close()
+        if self._pool_open:
+            self._pool.close()

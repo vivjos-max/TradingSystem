@@ -15,13 +15,24 @@ def test_dashboard_is_get_only_and_has_no_execution_or_secret_surface() -> None:
         "/api/v1/market/nifty/options",
         "/api/v1/market/nifty/candles?interval=1m",
         "/api/v1/market/nifty/candles?interval=5m",
+        "/api/v1/market/nifty/candles?interval=15m",
         "/api/v1/account/summary",
         "/api/v1/account/orders",
     }
     lowered = page.casefold()
     assert "method:" not in lowered
     assert not re.search(r"<(?:button|form)\b", lowered)
-    for forbidden in ("totp", "credential", "place order", "modify order", "cancel order", "approve", "buy", "sell", "execute"):
+    for forbidden in (
+        "totp",
+        "credential",
+        "place order",
+        "modify order",
+        "cancel order",
+        "approve",
+        "buy",
+        "sell",
+        "execute",
+    ):
         assert forbidden not in lowered
 
 
@@ -34,6 +45,7 @@ def test_topology_and_runtime_copy_boundaries_are_private() -> None:
         "worker",
         "postgres",
         "redis",
+        "migrate",
     }
     assert set(re.findall(r'"(127\.0\.0\.1:\d+:\d+)"', compose)) == {
         "127.0.0.1:3000:3000",
@@ -50,4 +62,12 @@ def test_topology_and_runtime_copy_boundaries_are_private() -> None:
     assert not any(name in runtime for name in ("tests", "fixtures", ".env", "artifacts"))
     package = json.loads((ROOT / "apps/frontend/package.json").read_text(encoding="utf-8"))
     dependencies = set(package["dependencies"]) | set(package["devDependencies"])
-    assert not dependencies & {"recharts", "zustand", "redux", "axios", "playwright", "vitest", "jest"}
+    assert not dependencies & {
+        "recharts",
+        "zustand",
+        "redux",
+        "axios",
+        "playwright",
+        "vitest",
+        "jest",
+    }

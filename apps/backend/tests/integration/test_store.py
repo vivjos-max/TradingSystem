@@ -10,7 +10,7 @@ import pytest
 from pydantic import SecretStr
 from redis import Redis
 
-from trading_system.models import Candle, DataSource, HealthState
+from trading_system.models import Candle, DataSource, EventOutcome, HealthState, PersistedEvent
 from trading_system.store import Store
 
 pytestmark = pytest.mark.integration
@@ -49,7 +49,7 @@ def test_store_is_idempotent_utc_rebuildable_and_secret_safe() -> None:
     bucket = datetime(2026, 8, 10, 4, 30, tzinfo=timezone.utc)
     observed = bucket.astimezone(timezone(timedelta(hours=5, minutes=30)))
     store = Store(POSTGRES_URL, REDIS_URL)
-    redis = Redis.from_url(REDIS_URL, decode_responses=True)
+    redis = Redis.from_url(REDIS_URL, decode_responses=True, protocol=2)
     quote_key = f"trading-system:v1:quote:{instrument}"
     candle_key = f"trading-system:v1:candle:{instrument}:1m"
 
@@ -87,6 +87,24 @@ def test_store_is_idempotent_utc_rebuildable_and_secret_safe() -> None:
         assert any(event["late"] for event in events)
         assert all(event["event_at"].utcoffset() == timedelta(0) for event in events)
         assert any(event["raw"] == {"ltp": "24500.10"} for event in events)
+        batch = tuple(
+            PersistedEvent(
+                kind="feed_depth",
+                source=source,
+                idempotency_key=f"batch:{run}:{offset}",
+                event_identity=f"batch:{run}:{offset}",
+                event_at=observed,
+                received_at=observed,
+                processed_at=observed,
+                raw={},
+                normalized={"instrument": instrument},
+                outcome=EventOutcome.ACCEPTED,
+                feed_generation="integration-generation",
+            )
+            for offset in range(2)
+        )
+        assert store.append_events(batch) == {item.idempotency_key for item in batch}
+        assert store.append_events(batch) == set()
 
         candle = Candle(
             instrument=instrument,
@@ -102,6 +120,16 @@ def test_store_is_idempotent_utc_rebuildable_and_secret_safe() -> None:
         assert store.upsert_candle(candle)
         assert not store.upsert_candle(candle)
         assert store.read_candles(instrument, "1m") == [candle]
+        live_candle = candle.model_copy(update={"source": DataSource.LIVE_ACCEPTED})
+        assert store.upsert_candle(live_candle)
+        assert store.read_candles(instrument, "1m") == [live_candle]
+        with psycopg.connect(POSTGRES_URL) as connection:
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM candles WHERE instrument = %s", (instrument,)
+                ).fetchone()[0]
+                == 2
+            )
 
         assert store.record_health_transition(
             subsystem="store-test",
@@ -137,13 +165,16 @@ def test_store_is_idempotent_utc_rebuildable_and_secret_safe() -> None:
         assert store.get_live_value("quote", identifier=instrument) is None
         assert store.rebuild_live_state() >= 2
         assert store.get_live_value("quote", identifier=instrument)["instrument"] == instrument
-        assert store.get_live_value("candle", identifier=instrument, interval="1m")["instrument"] == instrument
+        assert (
+            store.get_live_value("candle", identifier=instrument, interval="1m")["instrument"]
+            == instrument
+        )
         assert 0 < redis.ttl(candle_key) <= 600
     finally:
-        redis.delete(quote_key, candle_key)
         with psycopg.connect(POSTGRES_URL) as connection:
             connection.execute("DELETE FROM health_transitions WHERE idempotency_key = %s", (run,))
             connection.execute("DELETE FROM candles WHERE instrument = %s", (instrument,))
             connection.execute("DELETE FROM events WHERE source = %s", (source,))
+        redis.delete(quote_key, candle_key)
         redis.close()
         store.close()

@@ -12,6 +12,7 @@ const FAST_ENDPOINTS = [
   "/api/v1/market/nifty/options",
   "/api/v1/market/nifty/candles?interval=1m",
   "/api/v1/market/nifty/candles?interval=5m",
+  "/api/v1/market/nifty/candles?interval=15m",
 ] as const;
 const ACCOUNT_ENDPOINTS = [
   "/api/v1/account/summary",
@@ -34,19 +35,20 @@ type Instrument = {
 };
 type Quote = SourceStamped & { instrument?: Instrument; price?: string | number | null };
 type Market = SourceStamped & { spot?: Quote; future?: Quote | null };
-type OptionContract = SourceStamped & {
+type TimedField<T = string | number | null> = SourceStamped & { value?: T };
+type OptionContract = {
   instrument: Instrument;
-  ltp?: string | number | null;
-  bid?: string | number | null;
-  ask?: string | number | null;
-  spread?: string | number | null;
-  volume?: string | number | null;
-  open_interest?: string | number | null;
-  implied_volatility?: string | number | null;
-  delta?: string | number | null;
-  gamma?: string | number | null;
-  theta?: string | number | null;
-  vega?: string | number | null;
+  ltp?: TimedField;
+  bid?: TimedField;
+  ask?: TimedField;
+  depth?: TimedField<{ spread?: string | number | null }>;
+  volume?: TimedField;
+  open_interest?: TimedField;
+  implied_volatility?: TimedField;
+  delta?: TimedField;
+  gamma?: TimedField;
+  theta?: TimedField;
+  vega?: TimedField;
 };
 type Options = SourceStamped & {
   expiry?: string;
@@ -61,6 +63,10 @@ type Candle = {
   close: string | number;
   volume?: string | number | null;
   finalized?: boolean;
+  source?: string;
+  completeness?: string;
+  expected_components?: number;
+  actual_components?: number;
 };
 type Candles = SourceStamped & { interval?: string; candles?: Candle[] };
 type Subsystem = {
@@ -235,23 +241,27 @@ function CandleTable({ title, resource }: { title: string; resource: Resource<Ca
               <th scope="col">Low</th>
               <th scope="col">Close</th>
               <th scope="col">Volume</th>
+              <th scope="col">Quality</th>
+              <th scope="col">Provenance</th>
             </tr>
           </thead>
           <tbody>
             {rows.length ? (
               rows.map((row) => (
-                <tr key={row.bucket_start}>
+                <tr key={`${row.bucket_start}-${row.source ?? "unknown"}`}>
                   <th scope="row">{time(row.bucket_start)}</th>
                   <td>{value(row.open)}</td>
                   <td>{value(row.high)}</td>
                   <td>{value(row.low)}</td>
                   <td>{value(row.close)}</td>
                   <td>{value(row.volume)}</td>
+                  <td>{value(row.completeness)} ({value(row.actual_components)}/{value(row.expected_components)})</td>
+                  <td>{value(row.source)}</td>
                 </tr>
               ))
             ) : (
               <tr>
-                <td colSpan={6} className="empty">No live candle data —</td>
+                <td colSpan={8} className="empty">No live candle data —</td>
               </tr>
             )}
           </tbody>
@@ -274,6 +284,9 @@ export default function Dashboard() {
   ] as Resource<Candles>;
   const fiveMinuteResource = resources[
     "/api/v1/market/nifty/candles?interval=5m"
+  ] as Resource<Candles>;
+  const fifteenMinuteResource = resources[
+    "/api/v1/market/nifty/candles?interval=15m"
   ] as Resource<Candles>;
   const accountResource = resources["/api/v1/account/summary"] as Resource<Account>;
   const ordersResource = resources["/api/v1/account/orders"] as Resource<Orders>;
@@ -395,17 +408,17 @@ export default function Dashboard() {
                     <th scope="row">{value(contract.instrument.strike)}</th>
                     <td>{value(contract.instrument.option_type)}</td>
                     <td>{value(contract.instrument.trading_symbol)}</td>
-                    <td>{value(contract.ltp)}</td>
-                    <td>{value(contract.bid)}</td>
-                    <td>{value(contract.ask)}</td>
-                    <td>{value(contract.spread)}</td>
-                    <td>{value(contract.open_interest)}</td>
-                    <td>{value(contract.volume)}</td>
-                    <td>{value(contract.implied_volatility)}</td>
-                    <td>{value(contract.delta)}</td>
-                    <td>{value(contract.gamma)}</td>
-                    <td>{value(contract.theta)}</td>
-                    <td>{value(contract.vega)}</td>
+                    <td>{value(contract.ltp?.value)}</td>
+                    <td>{value(contract.bid?.value)}</td>
+                    <td>{value(contract.ask?.value)}</td>
+                    <td>{value(contract.depth?.value?.spread)}</td>
+                    <td>{value(contract.open_interest?.value)}</td>
+                    <td>{value(contract.volume?.value)}</td>
+                    <td>{value(contract.implied_volatility?.value)}</td>
+                    <td>{value(contract.delta?.value)}</td>
+                    <td>{value(contract.gamma?.value)}</td>
+                    <td>{value(contract.theta?.value)}</td>
+                    <td>{value(contract.vega?.value)}</td>
                   </tr>
                 ))
               ) : (
@@ -428,6 +441,7 @@ export default function Dashboard() {
         <div className="candle-grid">
           <CandleTable title="1-minute candles" resource={oneMinuteResource} />
           <CandleTable title="5-minute candles" resource={fiveMinuteResource} />
+          <CandleTable title="15-minute candles" resource={fifteenMinuteResource} />
         </div>
       </section>
 

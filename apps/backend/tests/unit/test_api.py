@@ -14,7 +14,13 @@ class MemoryStore:
     def __init__(self, ready=True):
         self.values = {}
         if ready:
-            for subsystem in ("stores", "account_reconciliation", "subscriptions", "market", "feed"):
+            for subsystem in (
+                "stores",
+                "account_reconciliation",
+                "subscriptions",
+                "market",
+                "feed",
+            ):
                 self.values[("heartbeat", subsystem)] = {
                     "subsystem": subsystem,
                     "state": "HEALTHY",
@@ -33,9 +39,21 @@ class MemoryStore:
                 "source": "LOCAL_RECONSTRUCTED",
                 "source_at": NOW.isoformat(),
             }
-            self.values[("quote", "NIFTY")] = {"price": "22100", "source": "GROWW_LIVE", "source_at": NOW.isoformat()}
-            self.values[("quote", "NIFTY-FUT")] = {"price": "22150", "source": "GROWW_LIVE", "source_at": NOW.isoformat()}
-            self.values[("option-chain", None)] = {"contracts": [], "source": "GROWW_LIVE", "source_at": NOW.isoformat()}
+            self.values[("quote", "NIFTY")] = {
+                "price": "22100",
+                "source": "GROWW_LIVE",
+                "source_at": NOW.isoformat(),
+            }
+            self.values[("quote", "NIFTY-FUT")] = {
+                "price": "22150",
+                "source": "GROWW_LIVE",
+                "source_at": NOW.isoformat(),
+            }
+            self.values[("option-chain", None)] = {
+                "contracts": [],
+                "source": "GROWW_LIVE",
+                "source_at": NOW.isoformat(),
+            }
             self.values[("account", None)] = {
                 "summary": {"available_margin": "1000", "positions": []},
                 "orders": [],
@@ -47,15 +65,17 @@ class MemoryStore:
         return self.values.get((kind, identifier))
 
     def read_candles(self, instrument, interval, *, limit):
-        return [Candle(
-            instrument=instrument,
-            interval=interval,
-            bucket_start=NOW,
-            open=Decimal("100"),
-            high=Decimal("101"),
-            low=Decimal("99"),
-            close=Decimal("100"),
-        )]
+        return [
+            Candle(
+                instrument=instrument,
+                interval=interval,
+                bucket_start=NOW,
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100"),
+            )
+        ]
 
 
 def client(ready=True):
@@ -67,7 +87,13 @@ def test_liveness_survives_blocked_readiness_and_error_is_safe() -> None:
     assert api.get("/health/live").status_code == 200
     response = api.get("/health/ready")
     assert response.status_code == 503
-    assert set(response.json()) == {"code", "reason", "subsystem", "correlation_id", "last_success_at"}
+    assert set(response.json()) == {
+        "code",
+        "reason",
+        "subsystem",
+        "correlation_id",
+        "last_success_at",
+    }
     assert "secret" not in response.text.lower() and "token" not in response.text.lower()
 
 
@@ -78,6 +104,7 @@ def test_read_endpoints_return_only_normalized_source_timestamped_state() -> Non
         "/api/v1/market/nifty",
         "/api/v1/market/nifty/options",
         "/api/v1/market/nifty/candles?interval=1m",
+        "/api/v1/market/nifty/candles?interval=15m",
         "/api/v1/account/summary",
         "/api/v1/account/orders",
     ):
@@ -98,6 +125,30 @@ def test_invalid_candle_interval_is_rejected() -> None:
     assert client().get("/api/v1/market/nifty/candles?interval=1h").status_code == 422
 
 
+def test_option_contract_fields_keep_independent_timestamps() -> None:
+    store = MemoryStore()
+    store.values[("option-chain", None)] = {
+        "contracts": ["NIFTY-CE"],
+        "source": "GROWW_LIVE",
+        "source_at": NOW.isoformat(),
+    }
+    store.values[("option-contract", "NIFTY-CE")] = {
+        "instrument": {"trading_symbol": "NIFTY-CE"},
+        "ltp": {"value": "100", "source": "LIVE_ACCEPTED", "source_at": NOW.isoformat()},
+        "depth": {
+            "value": {"bid": "99", "ask": "101"},
+            "source": "LIVE_ACCEPTED",
+            "source_at": (NOW - timedelta(seconds=1)).isoformat(),
+        },
+    }
+    contract = (
+        TestClient(create_app(AppContainer(store, lambda: NOW)))
+        .get("/api/v1/market/nifty/options")
+        .json()["contracts"][0]
+    )
+    assert contract["ltp"]["source_at"] != contract["depth"]["source_at"]
+
+
 def test_market_closed_is_not_misreported_as_stale_feed() -> None:
     store = MemoryStore()
     store.values.pop(("heartbeat", "feed"))
@@ -111,7 +162,12 @@ def test_market_closed_is_not_misreported_as_stale_feed() -> None:
     response = TestClient(create_app(AppContainer(store, lambda: NOW))).get("/api/v1/system/status")
     assert response.status_code == 200
     assert response.json()["state"] == "MARKET_CLOSED"
-    assert TestClient(create_app(AppContainer(store, lambda: NOW))).get("/api/v1/market/nifty").status_code == 200
+    assert (
+        TestClient(create_app(AppContainer(store, lambda: NOW)))
+        .get("/api/v1/market/nifty")
+        .status_code
+        == 200
+    )
 
 
 def test_stale_account_is_unavailable_and_degraded_depth_is_global() -> None:
@@ -122,7 +178,11 @@ def test_stale_account_is_unavailable_and_degraded_depth_is_global() -> None:
     assert response.status_code == 503 and response.json()["reason"] == "ACCOUNT_STATE_STALE"
 
     store.values[("account", None)]["source_at"] = NOW.isoformat()
-    store.values[("heartbeat", "depth")] = {"subsystem": "depth", "state": "DEGRADED", "reason": "MISSING_BOOK_SIDE"}
+    store.values[("heartbeat", "depth")] = {
+        "subsystem": "depth",
+        "state": "DEGRADED",
+        "reason": "MISSING_BOOK_SIDE",
+    }
     assert api.get("/api/v1/system/status").json()["state"] == "DEGRADED"
 
 

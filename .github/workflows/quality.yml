@@ -1,0 +1,56 @@
+name: quality
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: trading_system
+          POSTGRES_USER: trading_system
+          POSTGRES_PASSWORD: test-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trading_system" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:8-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+    env:
+      PYTHONPATH: apps/backend/src
+      DATABASE_URL: postgresql://trading_system:test-only@127.0.0.1:5432/trading_system
+      TEST_POSTGRES_URL: postgresql://trading_system:test-only@127.0.0.1:5432/trading_system
+      TEST_REDIS_URL: redis://127.0.0.1:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m pip install -r apps/backend/requirements.lock
+      - run: python -m pip install --no-deps -e apps/backend
+      - run: python -m alembic -c apps/backend/alembic.ini upgrade head
+      - run: python -m pytest apps/backend/tests -q
+      - run: ruff check apps/backend && ruff format --check apps/backend
+      - run: mypy --config-file apps/backend/pyproject.toml apps/backend/src
+      - run: python -m pip check
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: "24"}
+      - run: corepack enable && corepack prepare pnpm@11.16.0 --activate
+      - run: pnpm --dir apps/frontend install --frozen-lockfile
+      - run: pnpm --dir apps/frontend test
+      - run: pnpm --dir apps/frontend lint
+      - run: pnpm --dir apps/frontend typecheck
+      - run: pnpm --dir apps/frontend build
+      - run: pnpm --dir apps/frontend audit --prod --audit-level high

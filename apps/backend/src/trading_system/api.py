@@ -12,6 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .models import GlobalState, HealthState, SafeError
+from .market import Session, SessionState
+from .quality import assess_quality
 from .store import Store, StoreUnavailableError
 
 
@@ -61,6 +63,7 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
 
     app = FastAPI(title="Trading System Read API", docs_url=None, redoc_url=None)
     quote_stale_seconds = int(os.getenv("QUOTE_STALE_SECONDS", "15"))
+    option_stale_seconds = int(os.getenv("OPTION_STALE_SECONDS", "60"))
     max_clock_skew = timedelta(seconds=int(os.getenv("SOURCE_CLOCK_SKEW_SECONDS", "5")))
     app.add_middleware(
         CORSMiddleware,
@@ -74,6 +77,7 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
         return container.store.get_live_value(kind, identifier=identifier)
 
     def failure(subsystem: str, reason: str, last: datetime | str | None = None) -> JSONResponse:
+        last_at = _source_at({"source_at": last}) if last is not None else None
         return JSONResponse(
             status_code=503,
             content=SafeError(
@@ -81,7 +85,7 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
                 reason=reason,
                 subsystem=subsystem,
                 correlation_id=uuid4().hex,
-                last_success_at=last,
+                last_success_at=last_at,
             ).model_dump(mode="json"),
         )
 
@@ -109,9 +113,22 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
         try:
             if hasattr(container.store, "healthcheck"):
                 container.store.healthcheck()
-            for subsystem in ("stores", "account_reconciliation", "subscriptions", "market", "feed"):
+            for subsystem in (
+                "stores",
+                "account_reconciliation",
+                "subscriptions",
+                "market",
+                "feed",
+            ):
                 value = read("heartbeat", identifier=subsystem)
-                checks.append(value or {"subsystem": subsystem, "state": HealthState.BLOCKED, "reason": "NO_HEARTBEAT"})
+                checks.append(
+                    value
+                    or {
+                        "subsystem": subsystem,
+                        "state": HealthState.BLOCKED,
+                        "reason": "NO_HEARTBEAT",
+                    }
+                )
             subscription = read("subscription")
             account = read("account")
             session = read("heartbeat", identifier="market_session")
@@ -119,51 +136,105 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
             future = read("quote", identifier=subscription.get("future")) if subscription else None
             option_chain = read("option-chain")
         except StoreUnavailableError:
-            return False, [{"subsystem": "stores", "state": HealthState.BLOCKED, "reason": "REQUIRED_STORE_UNAVAILABLE"}]
+            return False, [
+                {
+                    "subsystem": "stores",
+                    "state": HealthState.BLOCKED,
+                    "reason": "REQUIRED_STORE_UNAVAILABLE",
+                }
+            ]
 
         now = container.clock()
         session_at = _source_at(session)
         if (
-            not session
+            not isinstance(session, dict)
             or str(session.get("state")) != HealthState.HEALTHY
             or session_at is None
             or session_at - now > max_clock_skew
         ):
-            checks[3] = {**checks[3], "state": HealthState.BLOCKED, "reason": "MARKET_SESSION_UNAVAILABLE"}
-        elif not spot or not future or not option_chain:
-            checks[3] = {**checks[3], "state": HealthState.BLOCKED, "reason": "REQUIRED_QUOTE_UNAVAILABLE"}
+            checks[3] = {
+                **checks[3],
+                "state": HealthState.BLOCKED,
+                "reason": "MARKET_SESSION_UNAVAILABLE",
+            }
+        elif not subscription or not spot or not future or not option_chain:
+            checks[3] = {
+                **checks[3],
+                "state": HealthState.BLOCKED,
+                "reason": "REQUIRED_QUOTE_UNAVAILABLE",
+            }
         else:
-            quote_times = (_source_at(spot), _source_at(future))
-            if any(value is None for value in quote_times):
-                checks[3] = {**checks[3], "state": HealthState.BLOCKED, "reason": "QUOTE_TIMESTAMP_MISSING"}
-            elif any(value - now > max_clock_skew for value in quote_times if value is not None):
-                checks[3] = {**checks[3], "state": HealthState.BLOCKED, "reason": "QUOTE_TIMESTAMP_FUTURE"}
-            elif (option_at := _source_at(option_chain)) is None or option_at - now > max_clock_skew:
-                checks[3] = {**checks[3], "state": HealthState.BLOCKED, "reason": "OPTION_TIMESTAMP_INVALID"}
-            elif session.get("reason") != "MARKET_CLOSED" and any(
-                now - value > timedelta(seconds=quote_stale_seconds) for value in quote_times if value is not None
-            ):
-                checks[3] = {**checks[3], "state": HealthState.STALE, "reason": "QUOTE_STALE"}
+            report = market_quality(subscription, spot, future, option_chain, session)
+            if report["status"] in {GlobalState.BLOCKED, GlobalState.STALE}:
+                issue = report["issues"][0]
+                checks[3] = {
+                    **checks[3],
+                    "state": report["status"],
+                    "reason": f"{issue['component'].upper()}_{issue['code']}",
+                }
         ready = all(str(item.get("state")) == HealthState.HEALTHY for item in checks)
         ready = ready and bool(subscription and subscription.get("active")) and account is not None
         account_at = _source_at(account)
         if account_at is None:
-            checks[1] = {**checks[1], "state": HealthState.BLOCKED, "reason": "ACCOUNT_TIMESTAMP_MISSING"}
+            checks[1] = {
+                **checks[1],
+                "state": HealthState.BLOCKED,
+                "reason": "ACCOUNT_TIMESTAMP_MISSING",
+            }
             ready = False
         elif account_at - now > max_clock_skew:
-            checks[1] = {**checks[1], "state": HealthState.BLOCKED, "reason": "ACCOUNT_TIMESTAMP_FUTURE"}
+            checks[1] = {
+                **checks[1],
+                "state": HealthState.BLOCKED,
+                "reason": "ACCOUNT_TIMESTAMP_FUTURE",
+            }
             ready = False
         elif now - account_at > timedelta(seconds=60):
             checks[1] = {**checks[1], "state": HealthState.STALE, "reason": "ACCOUNT_STATE_STALE"}
             ready = False
         feed_at = _source_at(checks[-1])
         if feed_at is None or feed_at - now > max_clock_skew:
-            checks[-1] = {**checks[-1], "state": HealthState.BLOCKED, "reason": "FEED_TIMESTAMP_INVALID"}
+            checks[-1] = {
+                **checks[-1],
+                "state": HealthState.BLOCKED,
+                "reason": "FEED_TIMESTAMP_INVALID",
+            }
             ready = False
         elif now - feed_at > timedelta(seconds=10):
             checks[-1] = {**checks[-1], "state": HealthState.STALE, "reason": "FEED_STALE"}
             ready = False
         return ready, checks
+
+    def market_quality(
+        subscription: Any, spot: Any, future: Any, options: Any, session_value: Any
+    ) -> dict[str, Any]:
+        subscription = subscription if isinstance(subscription, dict) else {}
+        options = options if isinstance(options, dict) else {}
+        session_value = session_value if isinstance(session_value, dict) else {}
+        if not session_value or str(session_value.get("state")) == HealthState.BLOCKED:
+            session = Session(SessionState.BLOCKED, "MARKET_SESSION_UNAVAILABLE")
+        elif session_value.get("reason") == "MARKET_CLOSED":
+            session = Session(SessionState.CLOSED, "MARKET_CLOSED")
+        else:
+            session = Session(SessionState.OPEN)
+        report = assess_quality(
+            session=session,
+            now=container.clock(),
+            timestamps={
+                "spot": _source_at(spot),
+                "future": _source_at(future),
+                "options": _source_at(options),
+            },
+            thresholds={
+                "spot": quote_stale_seconds,
+                "future": quote_stale_seconds,
+                "options": option_stale_seconds,
+            },
+            required=("spot", "future", "options"),
+            feed_generation=subscription.get("feed_generation") or options.get("feed_generation"),
+            max_future_seconds=int(max_clock_skew.total_seconds()),
+        )
+        return report.model_dump(mode="json")
 
     @app.get("/health/live")
     def live() -> dict[str, Any]:
@@ -173,7 +244,9 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
     def ready() -> Any:
         is_ready, checks = readiness()
         if not is_ready:
-            last = next((item.get("source_at") for item in reversed(checks) if item.get("source_at")), None)
+            last = next(
+                (item.get("source_at") for item in reversed(checks) if item.get("source_at")), None
+            )
             return failure("readiness", "STARTUP_OR_LIVE_PREREQUISITE_UNAVAILABLE", last)
         return {"ready": True, "source": "SHARED_LIVE_STATE", "source_at": container.clock()}
 
@@ -192,7 +265,10 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
         ]
         required_snapshots_healthy = all(state == HealthState.HEALTHY for state in required_states)
         depth_state = str(depth.get("state", HealthState.HEALTHY))
-        if str(session.get("state")) == HealthState.BLOCKED or HealthState.BLOCKED in required_states:
+        if (
+            str(session.get("state")) == HealthState.BLOCKED
+            or HealthState.BLOCKED in required_states
+        ):
             state = GlobalState.BLOCKED
         elif HealthState.STALE in required_states:
             state = GlobalState.STALE
@@ -231,7 +307,6 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
             session = read("heartbeat", identifier="market_session")
         except StoreUnavailableError:
             return failure("stores", "REQUIRED_STORE_UNAVAILABLE")
-        quote_times = (_source_at(spot), _source_at(future))
         session_at = _source_at(session)
         if (
             not session
@@ -240,28 +315,64 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
             or session_at - container.clock() > max_clock_skew
         ):
             return failure("market", "MARKET_SESSION_UNAVAILABLE")
-        if any(value is None for value in quote_times):
-            return failure("market", "QUOTE_TIMESTAMP_MISSING")
-        if any(value - container.clock() > max_clock_skew for value in quote_times if value is not None):
-            return failure("market", "QUOTE_TIMESTAMP_FUTURE")
-        if session.get("reason") != "MARKET_CLOSED" and any(
-            container.clock() - value > timedelta(seconds=quote_stale_seconds)
-            for value in quote_times
-            if value is not None
-        ):
-            return failure("market", "QUOTE_STALE", min(value for value in quote_times if value is not None))
+        options_value = required("option-chain", "options")
+        if isinstance(options_value, JSONResponse):
+            return options_value
+        quality = market_quality(subscription, spot, future, options_value, session)
+        if quality["status"] in {GlobalState.BLOCKED, GlobalState.STALE}:
+            issue = quality["issues"][0]
+            if issue["component"] in {"spot", "future"}:
+                reason = {
+                    "TIMESTAMP_FUTURE": "QUOTE_TIMESTAMP_FUTURE",
+                    "MISSING": "QUOTE_TIMESTAMP_MISSING",
+                    "STALE": "QUOTE_STALE",
+                }[issue["code"]]
+            else:
+                reason = f"OPTION_{issue['code']}"
+            return failure("market", reason)
         source_at = max(spot["source_at"], future["source_at"])
-        return {"spot": spot, "future": future, "source": "SHARED_LIVE_STATE", "source_at": source_at}
+        return {
+            "spot": spot,
+            "future": future,
+            "quality": quality,
+            "source": "SHARED_LIVE_STATE",
+            "source_at": source_at,
+        }
 
     @app.get("/api/v1/market/nifty/options")
     def options() -> Any:
         value = required("option-chain", "options")
         if isinstance(value, JSONResponse):
             return value
-        return {**value, "source": value.get("source", "SHARED_LIVE_STATE")}
+        try:
+            subscription = read("subscription")
+            session = read("heartbeat", identifier="market_session")
+            spot = read("quote", identifier=subscription.get("spot")) if subscription else None
+            future = read("quote", identifier=subscription.get("future")) if subscription else None
+        except StoreUnavailableError:
+            return failure("stores", "REQUIRED_STORE_UNAVAILABLE")
+        if subscription and spot and future:
+            quality = market_quality(subscription, spot, future, value, session)
+            if quality["status"] in {GlobalState.BLOCKED, GlobalState.STALE}:
+                issue = quality["issues"][0]
+                return failure("options", f"{issue['component'].upper()}_{issue['code']}")
+        contracts = value.get("contracts", ())
+        if contracts and isinstance(contracts[0], str):
+            assembled = []
+            for symbol in contracts:
+                contract = required("option-contract", "options", identifier=symbol)
+                if isinstance(contract, JSONResponse):
+                    return contract
+                assembled.append(contract)
+            contracts = assembled
+        return {
+            **value,
+            "contracts": contracts,
+            "source": value.get("source", "SHARED_LIVE_STATE"),
+        }
 
     @app.get("/api/v1/market/nifty/candles")
-    def candles(interval: Literal["1m", "5m"] = Query(...)) -> Any:
+    def candles(interval: Literal["1m", "5m", "15m"] = Query(...)) -> Any:
         subscription = required("subscription", "subscriptions")
         if isinstance(subscription, JSONResponse):
             return subscription
@@ -273,9 +384,14 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
             return failure("candles", "REQUIRED_LIVE_STATE_UNAVAILABLE")
         return {
             "interval": interval,
-            "candles": [value.model_dump(mode="json") if hasattr(value, "model_dump") else value for value in values],
+            "candles": [
+                value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+                for value in values
+            ],
             "source": "DURABLE_STORE",
-            "source_at": values[-1].bucket_start if hasattr(values[-1], "bucket_start") else values[-1]["bucket_start"],
+            "source_at": values[-1].bucket_start
+            if hasattr(values[-1], "bucket_start")
+            else values[-1]["bucket_start"],
         }
 
     @app.get("/api/v1/account/summary")
@@ -290,7 +406,11 @@ def create_app(container: AppContainer | Any | None = None) -> FastAPI:
         value = required("account", "account")
         if isinstance(value, JSONResponse):
             return value
-        return {"orders": value["orders"], "source": value["source"], "source_at": value["source_at"]}
+        return {
+            "orders": value["orders"],
+            "source": value["source"],
+            "source_at": value["source_at"],
+        }
 
     return app
 

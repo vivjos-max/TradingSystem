@@ -165,11 +165,22 @@ def test_unreviewed_sdk_version_fails_closed(monkeypatch):
     assert raised.value.detail.code == "GROWW_SDK_VERSION_UNSUPPORTED"
 
 
+def test_naive_broker_order_time_is_explicitly_assumed_ist():
+    from trading_system.groww import _datetime, _timezone_was_assumed
+
+    raw = "2026-08-17T14:00:00"
+    assert _datetime(raw).isoformat() == "2026-08-17T08:30:00+00:00"
+    assert _timezone_was_assumed(raw)
+
+
 def test_feed_credentials_are_scoped_private_and_cleaned(monkeypatch, tmp_path):
     import trading_system.groww as groww
 
     files = types.ModuleType("growwapi.common.files")
-    original = lambda file="original": "original"
+
+    def original(file="original"):
+        return "original"
+
     files.get_cwd = original
     package = types.ModuleType("growwapi")
     common = types.ModuleType("growwapi.common")

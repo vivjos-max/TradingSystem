@@ -9,14 +9,16 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal, cast
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pyotp
 
 from .config import Settings
 from .models import (
     AccountSummary,
+    Candle,
     DataSource,
     Instrument,
     NiftySnapshot,
@@ -60,7 +62,7 @@ def _require_supported_version() -> None:
 
 def _load_sdk() -> tuple[type[Any], type[Any]]:
     _require_supported_version()
-    from growwapi import GrowwAPI, GrowwFeed
+    from growwapi import GrowwAPI, GrowwFeed  # type: ignore[import-untyped]
 
     return GrowwAPI, GrowwFeed
 
@@ -78,13 +80,17 @@ def _safe_errors(subsystem: str = "groww") -> Iterator[None]:
         if name == "GrowwAPIAuthenticationException":
             raise _fail("GROWW_AUTH_FAILED", "Groww authentication failed", subsystem) from None
         if name == "GrowwAPIAuthorisationException":
-            raise _fail("GROWW_PERMISSION_DENIED", "Groww permission or entitlement denied", subsystem) from None
+            raise _fail(
+                "GROWW_PERMISSION_DENIED", "Groww permission or entitlement denied", subsystem
+            ) from None
         if name == "GrowwAPIRateLimitException":
             raise _fail("GROWW_RATE_LIMITED", "Groww rate limit reached", subsystem) from None
         if name in {"GrowwAPITimeoutException", "Timeout", "ReadTimeout", "ConnectTimeout"}:
             raise _fail("GROWW_TIMEOUT", "Groww request timed out", subsystem) from None
         if isinstance(exc, (KeyError, TypeError, ValueError, ArithmeticError)):
-            raise _fail("GROWW_CONTRACT_MISMATCH", "Groww returned an unexpected response shape", subsystem) from None
+            raise _fail(
+                "GROWW_CONTRACT_MISMATCH", "Groww returned an unexpected response shape", subsystem
+            ) from None
         raise _fail("GROWW_UNAVAILABLE", "Groww request failed", subsystem) from None
 
 
@@ -113,8 +119,14 @@ def _optional_decimal(value: Any) -> Decimal | None:
 def _datetime(value: Any) -> datetime:
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        raise ValueError("timestamp")
+        # Groww's documented and live order payloads can omit an offset. Exchange timestamps
+        # are interpreted as Asia/Kolkata and the assumption is exposed on the reconciled row.
+        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
     return parsed.astimezone(timezone.utc)
+
+
+def _timezone_was_assumed(value: Any) -> bool:
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).tzinfo is None
 
 
 def _quote_time(payload: dict[str, Any], fallback: datetime | None = None) -> datetime:
@@ -128,10 +140,13 @@ def _quote_time(payload: dict[str, Any], fallback: datetime | None = None) -> da
 
 def _instrument(row: dict[str, Any]) -> Instrument:
     kind = str(_required(row, "instrument_type"))
-    option_type = kind if kind in {"CE", "PE"} else None
+    option_type: Literal["CE", "PE"] | None = (
+        cast(Literal["CE", "PE"], kind) if kind in {"CE", "PE"} else None
+    )
     expiry = _optional(row.get("expiry_date"))
     return Instrument(
         trading_symbol=str(_required(row, "trading_symbol")),
+        groww_symbol=_optional(row.get("groww_symbol")),
         exchange_token=str(_required(row, "exchange_token")),
         exchange=str(_required(row, "exchange")),
         segment=str(_required(row, "segment")),
@@ -202,6 +217,58 @@ class GrowwReadClient:
                 source=DataSource.GROWW_LIVE,
                 source_at=_quote_time(payload, observed_at),
             )
+
+    def historical_candles(
+        self,
+        instrument: Instrument,
+        start: datetime,
+        end: datetime,
+        interval: str,
+    ) -> tuple[Candle, ...]:
+        intervals = {"1m": "1minute", "5m": "5minute", "15m": "15minute"}
+        if start.tzinfo is None or end.tzinfo is None or start >= end or interval not in intervals:
+            raise ValueError("invalid historical candle request")
+        if not instrument.groww_symbol:
+            raise ValueError("instrument does not expose groww_symbol")
+        typed_interval = cast(Literal["1m", "5m", "15m"], interval)
+        local = ZoneInfo("Asia/Kolkata")
+        with _safe_errors():
+            payload = self._client.get_historical_candles(
+                exchange=instrument.exchange,
+                segment=instrument.segment,
+                groww_symbol=instrument.groww_symbol,
+                start_time=start.astimezone(local).strftime("%Y-%m-%d %H:%M:%S"),
+                end_time=end.astimezone(local).strftime("%Y-%m-%d %H:%M:%S"),
+                candle_interval=intervals[interval],
+                timeout=self._timeout_seconds,
+            )
+            if not isinstance(payload, dict) or not isinstance(payload.get("candles"), list):
+                raise ValueError("historical candles")
+            self._audit_raw["historical_candles"] = payload
+            result = []
+            for row in payload["candles"]:
+                if not isinstance(row, list) or len(row) < 6:
+                    raise ValueError("historical candle")
+                opened = datetime.fromisoformat(str(row[0]))
+                if opened.tzinfo is None:
+                    opened = opened.replace(tzinfo=local)
+                opened = opened.astimezone(timezone.utc)
+                result.append(
+                    Candle(
+                        instrument=instrument.trading_symbol,
+                        interval=typed_interval,
+                        bucket_start=opened,
+                        open=_decimal(row[1]),
+                        high=_decimal(row[2]),
+                        low=_decimal(row[3]),
+                        close=_decimal(row[4]),
+                        volume=_optional_decimal(row[5]),
+                        source=DataSource.GROWW_HISTORICAL,
+                        source_event_at_min=opened,
+                        source_event_at_max=opened,
+                    )
+                )
+            return tuple(result)
 
     def market_snapshot(
         self,
@@ -322,6 +389,10 @@ class GrowwReadClient:
                     quantity=_decimal(_required(row, "quantity")),
                     average_price=_optional_decimal(row.get("net_price")),
                     pnl=_optional_decimal(row.get("realised_pnl")),
+                    realized_pnl=_optional_decimal(row.get("realised_pnl")),
+                    realized_pnl_source=(
+                        "BROKER" if _optional(row.get("realised_pnl")) is not None else None
+                    ),
                 )
                 for row in rows
             )
@@ -334,7 +405,7 @@ class GrowwReadClient:
 
     def orders_and_fills(self) -> tuple[ReconciledOrder, ...]:
         with _safe_errors():
-            audit = {"order_pages": [], "fill_pages": []}
+            audit: dict[str, list[Any]] = {"order_pages": [], "fill_pages": []}
             self._audit_raw["orders_and_fills"] = audit
             orders: dict[str, tuple[str, dict[str, Any]]] = {}
             for segment in ORDER_SEGMENTS:
@@ -343,7 +414,9 @@ class GrowwReadClient:
                     payload = self._client.get_order_list(
                         page=page, page_size=25, segment=segment, timeout=self._timeout_seconds
                     )
-                    audit["order_pages"].append({"segment": segment, "page": page, "payload": payload})
+                    audit["order_pages"].append(
+                        {"segment": segment, "page": page, "payload": payload}
+                    )
                     rows = _required(payload, "order_list")
                     if not isinstance(rows, list) or len(rows) > 25:
                         raise ValueError("order_list")
@@ -395,6 +468,9 @@ class GrowwReadClient:
                                 quantity=_decimal(_required(trade, "quantity")),
                                 price=_decimal(_required(trade, "price")),
                                 source_at=_datetime(_required(trade, "trade_date_time")),
+                                source_timezone_assumed=_timezone_was_assumed(
+                                    _required(trade, "trade_date_time")
+                                ),
                             ),
                         )
                     if len(trades) == 50 and len(fills) == before:
@@ -414,6 +490,7 @@ class GrowwReadClient:
                         quantity=_decimal(_required(row, "quantity")),
                         price=_optional_decimal(row.get("price")),
                         source_at=_datetime(_required(row, "created_at")),
+                        source_timezone_assumed=_timezone_was_assumed(_required(row, "created_at")),
                         fills=tuple(fills.values()),
                     )
                 )
@@ -427,7 +504,11 @@ class GrowwReadClient:
             if os.name != "nt":
                 directory.chmod(0o700)
                 directory_stat = directory.stat()
-                if stat.S_IMODE(directory_stat.st_mode) & 0o077 or directory_stat.st_uid != os.getuid():
+                getuid = getattr(os, "getuid")
+                if (
+                    stat.S_IMODE(directory_stat.st_mode) & 0o077
+                    or directory_stat.st_uid != getuid()
+                ):
                     raise _fail(
                         "GROWW_FEED_DIR_UNSAFE",
                         "Groww feed credential directory is not private",
@@ -441,7 +522,7 @@ class GrowwReadClient:
             ) from None
 
         _, GrowwFeed = _load_sdk()
-        import growwapi.common.files as files
+        import growwapi.common.files as files  # type: ignore[import-untyped]
 
         original_get_cwd = files.get_cwd
         previous_umask: int | None = None
@@ -499,7 +580,9 @@ class GrowwFeedClient:
                 raise ValueError("index feed")
             return payload
 
-    def unsubscribe_index_value(self, instruments: list[Instrument] | tuple[Instrument, ...]) -> Any:
+    def unsubscribe_index_value(
+        self, instruments: list[Instrument] | tuple[Instrument, ...]
+    ) -> Any:
         with _safe_errors("groww_feed"):
             return self._feed.unsubscribe_index_value(self._items(instruments))
 
@@ -539,7 +622,9 @@ class GrowwFeedClient:
                 raise ValueError("market depth feed")
             return payload
 
-    def unsubscribe_market_depth(self, instruments: list[Instrument] | tuple[Instrument, ...]) -> Any:
+    def unsubscribe_market_depth(
+        self, instruments: list[Instrument] | tuple[Instrument, ...]
+    ) -> Any:
         with _safe_errors("groww_feed"):
             return self._feed.unsubscribe_market_depth(self._items(instruments))
 

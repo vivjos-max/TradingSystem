@@ -10,4 +10,5 @@ htmlcov/
 node_modules/
 .next/
 apps/frontend/next-env.d.ts
+*.tsbuildinfo
 artifacts/live-acceptance/

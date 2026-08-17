@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,13 +22,17 @@ class Settings(BaseSettings):
 
     api_host: str = "127.0.0.1"
     api_port: int = 8000
-    feed_stale_seconds: int = 10
-    quote_stale_seconds: int = 15
-    source_clock_skew_seconds: int = 5
-    account_stale_seconds: int = 60
-    dependency_timeout_seconds: int = 2
-    groww_request_timeout_seconds: int = 5
-    option_window: int = 5
+    feed_stale_seconds: int = Field(default=10, gt=0)
+    quote_stale_seconds: int = Field(default=15, gt=0)
+    source_clock_skew_seconds: int = Field(default=5, gt=0)
+    account_stale_seconds: int = Field(default=60, gt=0)
+    option_stale_seconds: int = Field(default=60, gt=0)
+    dependency_timeout_seconds: int = Field(default=2, gt=0)
+    groww_request_timeout_seconds: int = Field(default=5, gt=0)
+    option_window: int = Field(default=5, ge=1)
+    ingestion_queue_capacity: int = Field(default=4096, gt=0)
+    ingestion_batch_size: int = Field(default=100, gt=0)
+    retention_enabled: bool = False
 
     @property
     def groww_configured(self) -> bool:
@@ -51,5 +55,9 @@ class Settings(BaseSettings):
             "quote_stale_seconds": self.quote_stale_seconds,
             "source_clock_skew_seconds": self.source_clock_skew_seconds,
             "account_stale_seconds": self.account_stale_seconds,
+            "option_stale_seconds": self.option_stale_seconds,
             "groww_request_timeout_seconds": self.groww_request_timeout_seconds,
+            "ingestion_queue_capacity": self.ingestion_queue_capacity,
+            "ingestion_batch_size": self.ingestion_batch_size,
+            "retention_enabled": self.retention_enabled,
         }

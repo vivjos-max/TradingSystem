@@ -5,10 +5,13 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from .models import (
     Candle,
+    CandleCompleteness,
+    DataSource,
     GlobalState,
     HealthState,
     Instrument,
@@ -79,7 +82,9 @@ def session_at(calendar: SessionCalendar, at: datetime) -> Session:
     return Session(SessionState.CLOSED, "MARKET_CLOSED")
 
 
-def global_state(states: list[HealthState] | tuple[HealthState, ...], session: Session) -> GlobalState:
+def global_state(
+    states: list[HealthState] | tuple[HealthState, ...], session: Session
+) -> GlobalState:
     if session.state is SessionState.BLOCKED or HealthState.BLOCKED in states:
         return GlobalState.BLOCKED
     if session.is_open and HealthState.STALE in states:
@@ -91,7 +96,9 @@ def global_state(states: list[HealthState] | tuple[HealthState, ...], session: S
     return GlobalState.LIVE
 
 
-def freshness_state(last_success: datetime | None, now: datetime, threshold_seconds: int) -> HealthState:
+def freshness_state(
+    last_success: datetime | None, now: datetime, threshold_seconds: int
+) -> HealthState:
     if last_success is None:
         return HealthState.BLOCKED
     if last_success.tzinfo is None or now.tzinfo is None:
@@ -116,11 +123,17 @@ def resolve_nifty_universe(
         if (item.underlying_symbol or item.trading_symbol).upper().replace(" ", "")
         in {"NIFTY", "NIFTY50"}
     ]
-    spots = [item for item in nifty if item.instrument_type.upper() in {"IDX", "INDEX"} and item.expiry is None]
+    spots = [
+        item
+        for item in nifty
+        if item.instrument_type.upper() in {"IDX", "INDEX"} and item.expiry is None
+    ]
     futures = [
         item
         for item in nifty
-        if "FUT" in item.instrument_type.upper() and item.expiry is not None and item.expiry >= as_of
+        if "FUT" in item.instrument_type.upper()
+        and item.expiry is not None
+        and item.expiry >= as_of
     ]
     options = [
         item
@@ -134,7 +147,7 @@ def resolve_nifty_universe(
         raise ValueError("instrument master does not contain the required NIFTY contracts")
 
     future = min(futures, key=lambda item: (item.expiry, item.trading_symbol))
-    option_expiry = min(item.expiry for item in options)
+    option_expiry = min(item.expiry for item in options if item.expiry is not None)
     expiry_options = [item for item in options if item.expiry == option_expiry]
     strikes = sorted({item.strike for item in expiry_options if item.strike is not None})
     atm = min(strikes, key=lambda strike: (abs(strike - spot_price), strike))
@@ -143,7 +156,11 @@ def resolve_nifty_universe(
     selected = tuple(
         sorted(
             (item for item in expiry_options if item.strike in selected_strikes),
-            key=lambda item: (item.strike or Decimal(0), item.option_type or "", item.trading_symbol),
+            key=lambda item: (
+                item.strike or Decimal(0),
+                item.option_type or "",
+                item.trading_symbol,
+            ),
         )
     )
     return NiftyUniverse(
@@ -162,9 +179,10 @@ def minute_bucket(at: datetime) -> datetime:
 
 
 class CandleBuilder:
-    def __init__(self) -> None:
+    def __init__(self, source: DataSource = DataSource.LIVE_ACCEPTED) -> None:
+        self.source = source
         self._pending: dict[tuple[str, datetime], list[MarketObservation]] = defaultdict(list)
-        self._seen: set[str] = set()
+        self._seen: dict[str, datetime] = {}
         self._finalized: set[tuple[str, datetime]] = set()
         self._late: list[MarketObservation] = []
 
@@ -175,13 +193,30 @@ class CandleBuilder:
     def add(self, observation: MarketObservation) -> str:
         if observation.observation_id in self._seen:
             return "DUPLICATE"
-        self._seen.add(observation.observation_id)
+        self._seen[observation.observation_id] = observation.event_at
         key = (observation.instrument, minute_bucket(observation.event_at))
         if key in self._finalized:
             self._late.append(observation)
             return "LATE"
         self._pending[key].append(observation)
         return "ACCEPTED"
+
+    def reset(self) -> None:
+        self._pending.clear()
+        self._seen.clear()
+        self._finalized.clear()
+        self._late.clear()
+
+    def prune_before(self, cutoff: datetime) -> None:
+        if cutoff.tzinfo is None:
+            raise ValueError("cutoff must be timezone-aware")
+        cutoff = cutoff.astimezone(timezone.utc)
+        self._pending = defaultdict(
+            list, {key: value for key, value in self._pending.items() if key[1] >= cutoff}
+        )
+        self._finalized = {key for key in self._finalized if key[1] >= cutoff}
+        self._seen = {key: at for key, at in self._seen.items() if at >= cutoff}
+        self._late = [item for item in self._late if item.event_at >= cutoff]
 
     def finalize_before(self, cutoff: datetime) -> tuple[Candle, ...]:
         if cutoff.tzinfo is None:
@@ -214,6 +249,9 @@ class CandleBuilder:
                     low=min(prices),
                     close=prices[-1],
                     volume=volume,
+                    source=self.source,
+                    source_event_at_min=observations[0].event_at,
+                    source_event_at_max=observations[-1].event_at,
                     observation_ids=tuple(item.observation_id for item in observations),
                 )
             )
@@ -221,41 +259,75 @@ class CandleBuilder:
         return tuple(candles)
 
 
-def aggregate_five_minute(candles: list[Candle] | tuple[Candle, ...]) -> tuple[Candle, ...]:
+def _session_bucket(at: datetime, minutes: int) -> datetime:
+    local = at.astimezone(IST)
+    opened = local.replace(hour=9, minute=15, second=0, microsecond=0)
+    elapsed = int((local - opened).total_seconds() // 60)
+    return (opened + timedelta(minutes=(elapsed // minutes) * minutes)).astimezone(timezone.utc)
+
+
+def aggregate_candles(
+    candles: list[Candle] | tuple[Candle, ...], minutes: Literal[5, 15]
+) -> tuple[Candle, ...]:
     groups: dict[tuple[str, datetime], list[Candle]] = defaultdict(list)
     for candle in candles:
         if candle.interval != "1m" or not candle.finalized:
             continue
-        bucket = candle.bucket_start.astimezone(timezone.utc).replace(
-            minute=candle.bucket_start.minute - candle.bucket_start.minute % 5,
-            second=0,
-            microsecond=0,
-        )
+        bucket = _session_bucket(candle.bucket_start, minutes)
         groups[(candle.instrument, bucket)].append(candle)
 
     result = []
     for (instrument, bucket), group in sorted(groups.items(), key=lambda item: item[0][1]):
         ordered = sorted(group, key=lambda candle: candle.bucket_start)
-        expected = [bucket + timedelta(minutes=offset) for offset in range(5)]
-        if [candle.bucket_start.astimezone(timezone.utc) for candle in ordered] != expected:
+        expected = [bucket + timedelta(minutes=offset) for offset in range(minutes)]
+        actual = [candle.bucket_start.astimezone(timezone.utc) for candle in ordered]
+        contiguous = actual == [value for value in expected if value in actual]
+        complete = actual == expected and all(
+            candle.completeness is CandleCompleteness.COMPLETE for candle in ordered
+        )
+        if not contiguous:
             continue
+        sources = {candle.source for candle in ordered}
         result.append(
             Candle(
                 instrument=instrument,
-                interval="5m",
+                interval="5m" if minutes == 5 else "15m",
                 bucket_start=bucket,
                 open=ordered[0].open,
                 high=max(candle.high for candle in ordered),
                 low=min(candle.low for candle in ordered),
                 close=ordered[-1].close,
                 volume=(
-                    sum((candle.volume for candle in ordered), Decimal(0))
+                    sum((candle.volume or Decimal(0) for candle in ordered), Decimal(0))
                     if all(candle.volume is not None for candle in ordered)
                     else None
                 ),
+                source=(sources.pop() if len(sources) == 1 else DataSource.DURABLE_RECONSTRUCTED),
+                finalized=complete,
+                completeness=(
+                    CandleCompleteness.COMPLETE if complete else CandleCompleteness.INCOMPLETE
+                ),
+                expected_components=minutes,
+                actual_components=len(ordered),
+                source_event_at_min=min(
+                    candle.source_event_at_min or candle.bucket_start for candle in ordered
+                ),
+                source_event_at_max=max(
+                    candle.source_event_at_max or candle.bucket_start for candle in ordered
+                ),
                 observation_ids=tuple(
-                    observation_id for candle in ordered for observation_id in candle.observation_ids
+                    observation_id
+                    for candle in ordered
+                    for observation_id in candle.observation_ids
                 ),
             )
         )
     return tuple(result)
+
+
+def aggregate_five_minute(candles: list[Candle] | tuple[Candle, ...]) -> tuple[Candle, ...]:
+    return tuple(
+        candle
+        for candle in aggregate_candles(candles, 5)
+        if candle.completeness is CandleCompleteness.COMPLETE
+    )

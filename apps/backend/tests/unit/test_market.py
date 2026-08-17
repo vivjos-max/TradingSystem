@@ -38,8 +38,12 @@ def test_calendar_unknown_blocks_and_state_precedence_is_honest() -> None:
 
     open_session = Session(SessionState.OPEN)
     closed_session = Session(SessionState.CLOSED)
-    assert global_state([HealthState.BLOCKED, HealthState.STALE], open_session) is GlobalState.BLOCKED
-    assert global_state([HealthState.STALE, HealthState.DEGRADED], open_session) is GlobalState.STALE
+    assert (
+        global_state([HealthState.BLOCKED, HealthState.STALE], open_session) is GlobalState.BLOCKED
+    )
+    assert (
+        global_state([HealthState.STALE, HealthState.DEGRADED], open_session) is GlobalState.STALE
+    )
     assert global_state([HealthState.DEGRADED], closed_session) is GlobalState.DEGRADED
     assert global_state([HealthState.HEALTHY], closed_session) is GlobalState.MARKET_CLOSED
     assert global_state([HealthState.HEALTHY], open_session) is GlobalState.LIVE
