@@ -1,1 +1,13 @@
 .worktrees/
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.coverage
+htmlcov/
+node_modules/
+.next/
+apps/frontend/next-env.d.ts
+artifacts/live-acceptance/

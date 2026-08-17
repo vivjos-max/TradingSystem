@@ -1,0 +1,105 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trading_system}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_system}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./apps/backend/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    command: ["sh", "-c", "exec redis-server --save '' --appendonly no --requirepass \"$${REDIS_PASSWORD}\""]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: runtime
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-trading_system}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_system}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      DEPENDENCY_TIMEOUT_SECONDS: 2
+      SOURCE_CLOCK_SKEW_SECONDS: ${SOURCE_CLOCK_SKEW_SECONDS:-5}
+    command: ["python", "-m", "uvicorn", "trading_system.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: runtime
+    user: "10001:10001"
+    environment:
+      GROWW_TOTP_TOKEN: ${GROWW_TOTP_TOKEN:-}
+      GROWW_TOTP_SECRET: ${GROWW_TOTP_SECRET:-}
+      GROWW_REQUEST_TIMEOUT_SECONDS: ${GROWW_REQUEST_TIMEOUT_SECONDS:-5}
+      GROWW_FEED_CREDENTIAL_DIR: /run/groww-feed
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-trading_system}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_system}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      DEPENDENCY_TIMEOUT_SECONDS: 2
+      SOURCE_CLOCK_SKEW_SECONDS: ${SOURCE_CLOCK_SKEW_SECONDS:-5}
+    command: ["python", "-m", "trading_system.worker"]
+    restart: on-failure
+    tmpfs:
+      - /run/groww-feed:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+      target: runtime
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8000
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8000
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

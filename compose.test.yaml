@@ -1,0 +1,22 @@
+services:
+  backend-test:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: test
+    environment:
+      TEST_POSTGRES_HOST: postgres
+      TEST_POSTGRES_PORT: 5432
+      TEST_POSTGRES_DB: ${POSTGRES_DB:-trading_system}
+      TEST_POSTGRES_USER: ${POSTGRES_USER:-trading_system}
+      TEST_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      TEST_REDIS_HOST: redis
+      TEST_REDIS_PORT: 6379
+      TEST_REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "pytest", "tests", "-q"]
+

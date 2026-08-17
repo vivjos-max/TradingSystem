@@ -1,0 +1,171 @@
+{
+  "iteration": 2,
+  "evaluatedAt": "2026-08-10T17:25:00Z",
+  "mode": "code-only",
+  "passThreshold": 7.0,
+  "overall": 6.9,
+  "weightedScore": 6.875,
+  "pass": false,
+  "verdict": "FAIL",
+  "verdictReason": "Automatic failure remains: a future-dated required quote is treated as fresh and can produce LIVE.",
+  "automaticFailAudit": {
+    "credentialLeak": {
+      "triggered": false,
+      "evidence": "No credential value or secret-bearing API/UI schema was found; .env is ignored and absent in this evaluation workspace."
+    },
+    "executionSurface": {
+      "triggered": false,
+      "evidence": "Generated OpenAPI contains exactly eight GET paths, and source scans found no placement, modification, cancellation, smart-order, or private NATS call."
+    },
+    "runtimeFixtureFallback": {
+      "triggered": false,
+      "evidence": "Runtime source contains no contract-fixture path/import and runtime Docker COPY allowlists exclude tests and fixtures."
+    },
+    "falseLive": {
+      "triggered": true,
+      "evidence": "The iteration-1 stale-past regression is fixed, but setting the required spot quote source_at 120 seconds in the future still returns global LIVE and HTTP 200 from the market endpoint."
+    }
+  },
+  "scores": [
+    {
+      "criterion": "Read-only security boundary",
+      "weight": 0.3,
+      "score": 8.0,
+      "weighted": 2.4,
+      "rationale": "Secret types/storage rejection, worker-only Groww configuration, GET-only OpenAPI/UI, and absence of broker mutation calls remain strong. Runtime container enforcement is externally blocked."
+    },
+    {
+      "criterion": "Live correctness and failure honesty",
+      "weight": 0.25,
+      "score": 5.0,
+      "weighted": 1.25,
+      "rationale": "Past-stale required quotes now fail closed and feed silence reconnects, but freshness still accepts future-dated source timestamps as healthy across quote/account/feed comparisons, leaving a reproducible false-LIVE path."
+    },
+    {
+      "criterion": "Deterministic data and persistence",
+      "weight": 0.2,
+      "score": 7.0,
+      "weighted": 1.4,
+      "rationale": "Universe selection, event-time candles, finalization/provenance, idempotent SQL, Redis TTLs, and rebuild logic remain implemented and locally tested; real PostgreSQL/Redis execution is blocked."
+    },
+    {
+      "criterion": "API, UI, and operability",
+      "weight": 0.15,
+      "score": 7.5,
+      "weighted": 1.125,
+      "rationale": "The stale market endpoint now fails closed, the dashboard builds and uses valid UTF-8 operational glyphs, and localhost/topology/docs remain coherent. Compose remains unverified."
+    },
+    {
+      "criterion": "Verification quality",
+      "weight": 0.1,
+      "score": 7.0,
+      "weighted": 0.7,
+      "rationale": "Available suites now cover the prior stale quote and reconnect paths, and the live 5m gate waits for fresh evidence. All runnable checks pass; Docker and credentialed live gates remain explicit blockers, while future-time freshness lacks coverage."
+    }
+  ],
+  "iteration1FindingResolution": [
+    {
+      "code": "FALSE_LIVE_STALE_REQUIRED_QUOTE",
+      "status": "RESOLVED_FOR_PAST_STALENESS",
+      "evidence": "A 120-second-old required spot quote now produces STALE and GET /api/v1/market/nifty returns 503 QUOTE_STALE; unit regression passes."
+    },
+    {
+      "code": "SILENT_FEED_BYPASSES_RECONNECT_BACKOFF",
+      "status": "RESOLVED",
+      "evidence": "FeedRestartRequired now enters the bounded reconnect branch; the worker-loop test proves a second connection and old-subscription cleanup before it completes."
+    },
+    {
+      "code": "LIVE_FIVE_MINUTE_GATE_TIMING",
+      "status": "RESOLVED",
+      "evidence": "The live gate separately waits up to 420 seconds and accepts only a fresh complete five-minute candle."
+    },
+    {
+      "code": "UI_MOJIBAKE",
+      "status": "RETRACTED",
+      "evidence": "Strict UTF-8 decoding found zero replacement/double-encoding markers and confirmed U+2014, U+00B7, and U+00B1. The iteration-1 report was misled by shell output decoding."
+    }
+  ],
+  "checks": [
+    {
+      "name": "past-stale quote regression",
+      "result": "PASS",
+      "evidence": "state=STALE, market_status=503, reason=QUOTE_STALE"
+    },
+    {
+      "name": "future-dated quote regression",
+      "result": "FAIL",
+      "evidence": "state=LIVE, market_status=200 for source_at 120 seconds ahead"
+    },
+    {
+      "name": "focused API/worker tests",
+      "result": "PASS",
+      "evidence": "16 passed, including stale-quote and worker reconnect regressions"
+    },
+    {
+      "name": "backend unit/contract/live collection",
+      "result": "PASS_WITH_EXPLICIT_SKIPS",
+      "evidence": "40 passed, 6 credentialed live tests skipped, 1 deprecation warning"
+    },
+    {
+      "name": "backend integration",
+      "result": "BLOCKED",
+      "evidence": "1 module-level skip: explicit TEST_POSTGRES_URL and TEST_REDIS_URL required"
+    },
+    {
+      "name": "backend compile",
+      "result": "PASS",
+      "evidence": "python -m compileall completed with exit 0"
+    },
+    {
+      "name": "frontend UTF-8 audit",
+      "result": "PASS",
+      "evidence": "Strict UTF-8 decode succeeded; page bad-marker counts were 0/0/0 and intended em-dash/middle-dot/plus-minus glyph counts were 9/7/1"
+    },
+    {
+      "name": "frontend render/build/audit",
+      "result": "PASS",
+      "evidence": "1 render test passed; Next.js production build/type check passed; no known production dependency vulnerabilities"
+    },
+    {
+      "name": "OpenAPI/static safety",
+      "result": "PASS",
+      "evidence": "8 OpenAPI paths, GET only; forbidden-call and runtime-fixture source scans returned no matches"
+    },
+    {
+      "name": "Docker/Compose/runtime images",
+      "result": "BLOCKED",
+      "evidence": "docker is not installed"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "critical",
+      "automaticFail": true,
+      "code": "FALSE_LIVE_FUTURE_SOURCE_TIMESTAMP",
+      "file": "apps/backend/src/trading_system/api.py",
+      "line": 123,
+      "summary": "Future-dated required source timestamps are treated as fresh.",
+      "evidence": "The freshness checks only test now - source_at > threshold. A spot quote 120 seconds ahead therefore passes readiness and the market endpoint, reproducing global LIVE and HTTP 200. Worker price/depth callbacks use the same one-sided age test, so an upstream future timestamp can enter shared live state and satisfy first-feed readiness.",
+      "action": "Reject or degrade timestamps beyond a small explicit clock-skew tolerance, apply the same bounded-age helper to quote, account, feed, and session freshness, reject future feed events before first_live_update, and add API plus worker regressions."
+    }
+  ],
+  "remainingHighFindings": [],
+  "externalBlockers": [
+    {
+      "gate": "PostgreSQL/Redis integration",
+      "reason": "Docker and explicit test service URLs are unavailable; the integration test remains an honest skip."
+    },
+    {
+      "gate": "Compose and runtime container isolation",
+      "reason": "Docker is not installed, so topology rendering, images, environment isolation, non-root UID, and feed tmpfs permissions are unverified."
+    },
+    {
+      "gate": "Credentialed Groww acceptance",
+      "reason": "No local .env/TOTP credentials or subscription evidence is available; authentication, real reconciliation, and real response shapes are unverified."
+    },
+    {
+      "gate": "Market-hours feed and candle proof",
+      "reason": "A running credentialed stack and exchange-open observation window are unavailable."
+    }
+  ]
+}

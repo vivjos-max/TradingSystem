@@ -1,0 +1,17 @@
+{
+  "trade_list": [
+    {
+      "price": 22400,
+      "quantity": 75,
+      "groww_order_id": "ORDER-1",
+      "groww_trade_id": "TRADE-1",
+      "exchange_trade_id": "EXCHANGE-TRADE-1",
+      "trade_status": "EXECUTED",
+      "trading_symbol": "NIFTY26AUGFUT",
+      "exchange": "NSE",
+      "segment": "FNO",
+      "product": "NRML",
+      "trade_date_time": "2026-08-10T09:16:22Z"
+    }
+  ]
+}

@@ -1,0 +1,168 @@
+{
+  "iteration": 1,
+  "evaluatedAt": "2026-08-10T17:13:45Z",
+  "mode": "code-only",
+  "passThreshold": 7.0,
+  "overall": 6.5,
+  "weightedScore": 6.45,
+  "pass": false,
+  "verdict": "FAIL",
+  "verdictReason": "Automatic failure: a required NIFTY spot quote can be stale while the API reports LIVE.",
+  "automaticFailAudit": {
+    "credentialLeak": {
+      "triggered": false,
+      "evidence": "No committed/runtime credential value or secret-bearing API/UI schema was found; .env is ignored and absent in this evaluation workspace."
+    },
+    "executionSurface": {
+      "triggered": false,
+      "evidence": "The generated OpenAPI allowlist contains exactly eight GET routes; source scans found no placement, modification, cancellation, smart-order, or private NATS call in application code."
+    },
+    "runtimeFixtureFallback": {
+      "triggered": false,
+      "evidence": "Runtime source contains no contract-fixture import/path and runtime Docker COPY allowlists exclude tests and fixtures."
+    },
+    "falseLive": {
+      "triggered": true,
+      "evidence": "A local regression set the required spot quote source_at to 120 seconds old while all heartbeats remained healthy; GET /api/v1/system/status returned LIVE."
+    }
+  },
+  "scores": [
+    {
+      "criterion": "Read-only security boundary",
+      "weight": 0.3,
+      "score": 8.0,
+      "weighted": 2.4,
+      "rationale": "Secrets use secret types and storage-key rejection, worker-only Groww environment/tmpfs boundaries are declared, OpenAPI/UI are GET-only, and no broker mutation call was found. Container enforcement is not locally verified."
+    },
+    {
+      "criterion": "Live correctness and failure honesty",
+      "weight": 0.25,
+      "score": 4.0,
+      "weighted": 1.0,
+      "rationale": "Segmented pagination, reconciliation ordering, calendar blocking, and event-age rejection exist, but required quote freshness is absent from readiness/global status and the silent-feed branch exits instead of using the bounded reconnect loop."
+    },
+    {
+      "criterion": "Deterministic data and persistence",
+      "weight": 0.2,
+      "score": 7.0,
+      "weighted": 1.4,
+      "rationale": "Universe selection, event-time one-minute candles, finalized five-minute aggregation, late/duplicate handling, SQL idempotency, Redis TTLs, and rebuild logic are implemented and unit-tested; real PostgreSQL/Redis execution is blocked."
+    },
+    {
+      "criterion": "API, UI, and operability",
+      "weight": 0.15,
+      "score": 7.0,
+      "weighted": 1.05,
+      "rationale": "Eight endpoints, localhost bindings, five-service topology, status-first responsive dashboard, source timestamps, accessible tables/status text, and operating docs exist; Compose is unverified and UI separator glyphs are visibly mojibaked."
+    },
+    {
+      "criterion": "Verification quality",
+      "weight": 0.1,
+      "score": 6.0,
+      "weighted": 0.6,
+      "rationale": "All available unit/contract/static/frontend checks pass and blocked gates are explicit and runnable, but the suite misses the reproduced false-LIVE case, Docker integration is skipped, live tests are skipped, and the fresh-stack five-minute acceptance timing is unreliable."
+    }
+  ],
+  "checks": [
+    {
+      "name": "backend unit/contract/live collection",
+      "result": "PASS_WITH_EXPLICIT_SKIPS",
+      "evidence": "38 passed, 6 credentialed live tests skipped, 1 deprecation warning"
+    },
+    {
+      "name": "backend integration",
+      "result": "BLOCKED",
+      "evidence": "1 module-level skip: explicit TEST_POSTGRES_URL and TEST_REDIS_URL required"
+    },
+    {
+      "name": "backend compile",
+      "result": "PASS",
+      "evidence": "python -m compileall completed with exit 0"
+    },
+    {
+      "name": "frontend render test",
+      "result": "PASS",
+      "evidence": "1 passed"
+    },
+    {
+      "name": "frontend production build",
+      "result": "PASS",
+      "evidence": "Next.js 16.3.0 compiled, type-checked, and generated static routes"
+    },
+    {
+      "name": "frontend production dependency audit",
+      "result": "PASS",
+      "evidence": "No known vulnerabilities found"
+    },
+    {
+      "name": "false-LIVE regression",
+      "result": "FAIL",
+      "evidence": "status=LIVE with spot_quote_age_seconds=120"
+    },
+    {
+      "name": "Docker/Compose/runtime images",
+      "result": "BLOCKED",
+      "evidence": "docker is not installed"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "critical",
+      "automaticFail": true,
+      "code": "FALSE_LIVE_STALE_REQUIRED_QUOTE",
+      "file": "apps/backend/src/trading_system/api.py",
+      "line": 89,
+      "summary": "Readiness and global status never evaluate required quote source timestamps.",
+      "evidence": "readiness() reads heartbeats, subscription, and account only; status() returns LIVE when those values are healthy. Worker._store_market() marks market HEALTHY without applying the 15-second quote threshold. A 120-second-old spot quote reproduced LIVE locally.",
+      "action": "Evaluate the subscribed spot and future source_at values against quote_stale_seconds during an open session before readiness/status can be LIVE, fail the market endpoint closed for stale required quotes, and add the reproduced regression test."
+    },
+    {
+      "severity": "high",
+      "automaticFail": false,
+      "code": "SILENT_FEED_BYPASSES_RECONNECT_BACKOFF",
+      "file": "apps/backend/src/trading_system/worker.py",
+      "line": 609,
+      "summary": "The explicit feed-silence path exits Worker.run instead of reconnecting with bounded backoff.",
+      "evidence": "except FeedRestartRequired records STALE and immediately re-raises outside the worker loop; only other exceptions reach the reconnect wait at lines 612-624.",
+      "action": "Route FeedRestartRequired through the existing reconnect branch and add a runnable worker-loop test proving silence produces STALE, cleanup, bounded wait, and resubscription without ending run()."
+    },
+    {
+      "severity": "medium",
+      "automaticFail": false,
+      "code": "LIVE_FIVE_MINUTE_GATE_TIMING",
+      "file": "apps/backend/tests/live/test_live_foundation.py",
+      "line": 301,
+      "summary": "A fresh open-market stack can fail the live gate before five complete source minutes exist.",
+      "evidence": "The test waits at most 90 seconds for any one-minute candle, then immediately requires a five-minute candle even though the approved plan says to compare it when five minutes are available.",
+      "action": "Wait for a complete fresh five-minute window with a dedicated timeout, or record only that sub-check as pending until five source minutes exist; never accept an old candle as proof."
+    },
+    {
+      "severity": "low",
+      "automaticFail": false,
+      "code": "UI_MOJIBAKE",
+      "file": "apps/frontend/src/app/page.tsx",
+      "line": 162,
+      "summary": "Operational separators and missing-value glyphs render as mojibake.",
+      "evidence": "User-visible literals contain characters such as 'a-with-circumflex/euro/dash' and 'A-with-circumflex/middle-dot' rather than the intended em dash and middle dot.",
+      "action": "Replace the double-encoded literals with valid UTF-8 glyphs or plain ASCII equivalents and assert the rendered output."
+    }
+  ],
+  "externalBlockers": [
+    {
+      "gate": "PostgreSQL/Redis integration",
+      "reason": "Docker and explicit test service URLs are unavailable; the integration test remains an honest skip."
+    },
+    {
+      "gate": "Compose and runtime container isolation",
+      "reason": "Docker is not installed, so topology rendering, images, environment isolation, non-root UID, and feed tmpfs permissions are unverified."
+    },
+    {
+      "gate": "Credentialed Groww acceptance",
+      "reason": "No local .env/TOTP credentials or subscription evidence is available; authentication, real account reconciliation, and real response shapes are unverified."
+    },
+    {
+      "gate": "Market-hours feed and candle proof",
+      "reason": "A running credentialed stack and exchange-open observation window are unavailable."
+    }
+  ]
+}

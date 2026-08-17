@@ -1,0 +1,162 @@
+{
+  "iteration": 3,
+  "evaluatedAt": "2026-08-10T17:33:29Z",
+  "mode": "code-only",
+  "passThreshold": 7.0,
+  "overall": 7.6,
+  "weightedScore": 7.55,
+  "pass": true,
+  "verdict": "PASS",
+  "releaseStatus": "EXTERNAL_GATES_PENDING",
+  "verdictReason": "All code-only automatic-fail checks are clear and the weighted score exceeds the threshold. Docker-backed and credentialed live acceptance remain external blockers, so this is not a full release-completion claim.",
+  "automaticFailAudit": {
+    "credentialLeak": {
+      "triggered": false,
+      "evidence": "No credential value or secret-bearing API/UI schema was found; .env is ignored and absent, secret types and persistence rejection tests pass."
+    },
+    "executionSurface": {
+      "triggered": false,
+      "evidence": "Generated OpenAPI contains exactly eight GET paths, the UI uses GET only, and source/tests found no broker placement, modification, cancellation, smart-order, or private NATS call."
+    },
+    "runtimeFixtureFallback": {
+      "triggered": false,
+      "evidence": "Runtime source contains no contract-fixture path/import, runtime Docker COPY allowlists exclude tests/fixtures, and fixture-boundary tests pass."
+    },
+    "falseLive": {
+      "triggered": false,
+      "evidence": "Required quotes 120 seconds old produce STALE/503 and 120 seconds future produce BLOCKED/503. Future market-session, option, account, and feed timestamps block. A future option LTP/depth event is audited late, never enters CandleBuilder/live state, leaves first_feed false, and the API remains STALE rather than LIVE."
+    }
+  },
+  "scores": [
+    {
+      "criterion": "Read-only security boundary",
+      "weight": 0.3,
+      "score": 8.0,
+      "weighted": 2.4,
+      "rationale": "Secrets are typed/redacted and rejected from persistence, worker/API/frontend boundaries are explicit, OpenAPI/UI are GET-only, and no mutation call is present. Runtime container enforcement remains externally unverified."
+    },
+    {
+      "criterion": "Live correctness and failure honesty",
+      "weight": 0.25,
+      "score": 7.5,
+      "weighted": 1.875,
+      "rationale": "Past-stale and future-dated required sources fail closed; future/stale price and depth events are audited without live promotion; reconciliation, segmented pagination, calendar blocking, reconnect backoff, and readiness ordering are covered. Real Groww behavior remains unverified."
+    },
+    {
+      "criterion": "Deterministic data and persistence",
+      "weight": 0.2,
+      "score": 7.0,
+      "weighted": 1.4,
+      "rationale": "Universe selection, event-time 1m candles, finalized 5m provenance, late/duplicate handling, SQL idempotency, Redis TTLs, and rebuild logic are implemented and locally tested. Real PostgreSQL/Redis execution is blocked."
+    },
+    {
+      "criterion": "API, UI, and operability",
+      "weight": 0.15,
+      "score": 7.5,
+      "weighted": 1.125,
+      "rationale": "Eight read endpoints, fail-closed market/account/option responses, localhost topology, status-first accessible dashboard, valid UTF-8 text, and runnable operating docs exist. Compose execution remains blocked."
+    },
+    {
+      "criterion": "Verification quality",
+      "weight": 0.1,
+      "score": 7.5,
+      "weighted": 0.75,
+      "rationale": "All available backend, OpenAPI, UI-safety, frontend render/build, dependency, stale/future-source, reconnect, and worker trust-boundary checks pass. Seven Docker/live skips are explicit external blockers with runnable gates."
+    }
+  ],
+  "iterationResolution": [
+    {
+      "code": "FALSE_LIVE_STALE_REQUIRED_QUOTE",
+      "status": "RESOLVED",
+      "evidence": "A required quote 120 seconds old yields STALE and market HTTP 503 QUOTE_STALE."
+    },
+    {
+      "code": "SILENT_FEED_BYPASSES_RECONNECT_BACKOFF",
+      "status": "RESOLVED",
+      "evidence": "FeedRestartRequired uses bounded reconnect and old-subscription cleanup; the worker-loop regression passes."
+    },
+    {
+      "code": "LIVE_FIVE_MINUTE_GATE_TIMING",
+      "status": "RESOLVED",
+      "evidence": "The live gate separately waits up to 420 seconds and accepts only a fresh complete five-minute candle."
+    },
+    {
+      "code": "UI_MOJIBAKE",
+      "status": "RETRACTED",
+      "evidence": "Strict UTF-8 decoding finds no replacement/double-encoding markers and confirms the intended Unicode glyphs."
+    },
+    {
+      "code": "FALSE_LIVE_FUTURE_SOURCE_TIMESTAMP",
+      "status": "RESOLVED",
+      "evidence": "Required source timestamps beyond five seconds future block, and future broker LTP/depth events are audited but never promoted to first-feed, quote, or candle state."
+    }
+  ],
+  "checks": [
+    {
+      "name": "required quote past/future regressions",
+      "result": "PASS",
+      "evidence": "-120s => STALE/503 QUOTE_STALE; +120s => BLOCKED/503 QUOTE_TIMESTAMP_FUTURE"
+    },
+    {
+      "name": "other required source future timestamps",
+      "result": "PASS",
+      "evidence": "Market-session, option, account, and feed source_at +120s each produce BLOCKED"
+    },
+    {
+      "name": "worker future feed trust boundary",
+      "result": "PASS",
+      "evidence": "+120s option LTP: first_feed=false, quote_promoted=false, candles=0, global state=STALE; unit regression also covers depth"
+    },
+    {
+      "name": "focused API/worker tests",
+      "result": "PASS",
+      "evidence": "17 passed, including required timestamp, future LTP/depth, and reconnect regressions"
+    },
+    {
+      "name": "full backend test collection",
+      "result": "PASS_WITH_EXPLICIT_SKIPS",
+      "evidence": "41 passed, 7 explicit PostgreSQL/Redis/live skips, 1 dependency deprecation warning"
+    },
+    {
+      "name": "frontend render/build/dependency audit",
+      "result": "PASS",
+      "evidence": "1 server-render test passed; Next.js production build/type check passed; no known production dependency vulnerabilities"
+    },
+    {
+      "name": "frontend UTF-8 audit",
+      "result": "PASS",
+      "evidence": "Strict UTF-8 decode succeeds with no replacement/double-encoding markers and intended operational glyphs present"
+    },
+    {
+      "name": "OpenAPI/read-only/fixture/security checks",
+      "result": "PASS",
+      "evidence": "Eight GET paths only; UI and adapter safety, secret persistence rejection, forbidden-call scan, and runtime-fixture boundary checks pass"
+    },
+    {
+      "name": "Docker/Compose/runtime images",
+      "result": "BLOCKED",
+      "evidence": "docker is not installed"
+    }
+  ],
+  "findings": [],
+  "remainingCriticalFindings": [],
+  "remainingHighFindings": [],
+  "externalBlockers": [
+    {
+      "gate": "PostgreSQL/Redis integration",
+      "reason": "Docker and explicit test service URLs are unavailable; the integration test remains an honest skip."
+    },
+    {
+      "gate": "Compose and runtime container isolation",
+      "reason": "Docker is not installed, so topology rendering, images, environment isolation, non-root UID, and feed tmpfs permissions are unverified."
+    },
+    {
+      "gate": "Credentialed Groww acceptance",
+      "reason": "No local .env/TOTP credentials or subscription evidence is available; authentication, real reconciliation, and live response shapes are unverified."
+    },
+    {
+      "gate": "Market-hours feed and candle proof",
+      "reason": "A running credentialed stack and exchange-open observation window are unavailable."
+    }
+  ]
+}

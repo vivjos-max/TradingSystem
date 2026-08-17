@@ -1,0 +1,17 @@
+{
+  "positions": [
+    {
+      "trading_symbol": "NIFTY26AUGFUT",
+      "segment": "FNO",
+      "credit_quantity": 75,
+      "credit_price": 22400,
+      "debit_quantity": 0,
+      "debit_price": 0,
+      "exchange": "NSE",
+      "quantity": 75,
+      "product": "NRML",
+      "net_price": 22400,
+      "realised_pnl": 500
+    }
+  ]
+}

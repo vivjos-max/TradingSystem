@@ -1,0 +1,35 @@
+{
+  "underlying_ltp": 22510.5,
+  "strikes": {
+    "22500": {
+      "CE": {
+        "greeks": {
+          "delta": 0.51,
+          "gamma": 0.001,
+          "theta": -8.1,
+          "vega": 13.1,
+          "rho": 2.7,
+          "iv": 12.4
+        },
+        "trading_symbol": "NIFTY26AUG22500CE",
+        "ltp": 120.5,
+        "open_interest": 700,
+        "volume": 500
+      },
+      "PE": {
+        "greeks": {
+          "delta": -0.49,
+          "gamma": 0.001,
+          "theta": -7.9,
+          "vega": 13.0,
+          "rho": -2.6,
+          "iv": 12.6
+        },
+        "trading_symbol": "NIFTY26AUG22500PE",
+        "ltp": null,
+        "open_interest": 745,
+        "volume": null
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+[
+  {
+    "exchange": "NSE",
+    "exchange_token": "NIFTY",
+    "trading_symbol": "NIFTY",
+    "instrument_type": "IDX",
+    "segment": "CASH",
+    "underlying_symbol": null,
+    "lot_size": 1,
+    "expiry_date": null,
+    "strike_price": null,
+    "tick_size": 0.05
+  },
+  {
+    "exchange": "NSE",
+    "exchange_token": "90001",
+    "trading_symbol": "NIFTY26AUGFUT",
+    "instrument_type": "FUT",
+    "segment": "FNO",
+    "underlying_symbol": "NIFTY",
+    "lot_size": 75,
+    "expiry_date": "2026-08-27",
+    "strike_price": null,
+    "tick_size": 0.05
+  },
+  {
+    "exchange": "NSE",
+    "exchange_token": "90002",
+    "trading_symbol": "NIFTY26AUG22500CE",
+    "instrument_type": "CE",
+    "segment": "FNO",
+    "underlying_symbol": "NIFTY",
+    "lot_size": 75,
+    "expiry_date": "2026-08-27",
+    "strike_price": 22500,
+    "tick_size": 0.05
+  },
+  {
+    "exchange": "NSE",
+    "exchange_token": "90003",
+    "trading_symbol": "NIFTY26AUG22500PE",
+    "instrument_type": "PE",
+    "segment": "FNO",
+    "underlying_symbol": "NIFTY",
+    "lot_size": 75,
+    "expiry_date": "2026-08-27",
+    "strike_price": 22500,
+    "tick_size": 0.05
+  }
+]

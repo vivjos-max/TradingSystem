@@ -1,0 +1,7 @@
+{
+  "brief": "Build the approved live read-only Groww foundation",
+  "maxIterations": 3,
+  "passThreshold": 7.0,
+  "evalMode": "code-only",
+  "skipPlanner": true
+}

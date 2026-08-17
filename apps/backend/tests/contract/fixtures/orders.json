@@ -1,0 +1,15 @@
+{
+  "order_list": [
+    {
+      "groww_order_id": "ORDER-1",
+      "trading_symbol": "NIFTY26AUGFUT",
+      "order_status": "EXECUTED",
+      "quantity": 75,
+      "price": 22400,
+      "exchange": "NSE",
+      "segment": "FNO",
+      "product": "NRML",
+      "created_at": "2026-08-10T09:15:22Z"
+    }
+  ]
+}
